@@ -4,9 +4,13 @@ from la.contracts import digest, sha256, validate_batch
 
 LIMITS = {'bytes': 5 * 1024 * 1024, 'records': 10000, 'width': 256, 'brief': 4000}
 
-def ingest_bytes(data: bytes, brief: str, permitted_samples: dict) -> dict:
+def ingest_bytes(data: bytes, brief: str, permitted_samples: dict, *, declared_encoding='ASCII', declared_record_type='fixed-width', declared_numeric='ascii', declared_family=None) -> dict:
     source = sha256(data)
     reasons = []
+    if declared_family is not None: declared_record_type=declared_family
+    if declared_encoding.upper() != 'ASCII': reasons.append('unsupported_encoding')
+    if declared_record_type != 'fixed-width': reasons.append('unsupported_record_family')
+    if declared_numeric != 'ascii': reasons.append('unsupported_packed_decimal' if declared_numeric=='packed_decimal' else 'unsupported_numeric')
     if not data: reasons.append('empty_input')
     if len(data) > LIMITS['bytes']: reasons.append('file_limit')
     if len(brief) > LIMITS['brief']: reasons.append('brief_limit')
@@ -58,6 +62,7 @@ def ingest_bytes(data: bytes, brief: str, permitted_samples: dict) -> dict:
         'records': authorized[:64], 'selected_ordinals': [r['ordinal'] for r in authorized[:64]],
         'truncated': len(authorized) > 64}
     return validate_batch(dict(schema_version=1, source_sha256=source, framing_sha256=framing_hash,
-        framing=framing, encoding='ASCII', width=width, status='refused' if reasons else 'accepted',
+        framing=framing, encoding='ASCII', declared_format={'encoding':declared_encoding,'record_family':declared_record_type,'numeric':declared_numeric}, width=width, status='refused' if reasons else 'accepted',
         reasons=sorted(set(reasons)), records=records, brief_sha256=sha256(brief.encode()), samples=samples,
-        config_sha256=digest(LIMITS)))
+        config_sha256=digest(dict(LIMITS,declared_encoding=declared_encoding,
+            declared_record_type=declared_record_type,declared_numeric=declared_numeric))))

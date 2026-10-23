@@ -2,7 +2,7 @@
 
 Local CLI and static report for a narrow synthetic fixed-width ASCII account ledger. It retains source bytes, proposes finite interpretations, records explicit rulings in SQLite, and creates hash-bound PostgreSQL migration candidates. Required concepts are account_ref, description, balance, effective_date and status. Ambiguity remains incomplete until resolved; unresolved raw bytes never become typed text.
 
-This source was constructed in Dirty Mode. Runtime, integration, database verification, benchmark and product acceptance have **not run**. Dependency versions are declared ranges, not a tested lock. No production migration or live model adapter is provided. The inference wheel contains only `src/la`; evaluator code and fixtures remain separate.
+This source was constructed in Dirty Mode. Runtime, integration, database verification, benchmark and product acceptance have **not run**. Dependency versions are declared ranges, not a tested lock. No production migration is supported. The live adapter is source only with activation gates closed. The inference wheel contains only `src/la`; evaluator code and fixtures remain separate.
 
 After the authorized environment activation phase, use Python 3.12 and install with `uv sync`. Example commands (not executed during construction):
 

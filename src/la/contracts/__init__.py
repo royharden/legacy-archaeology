@@ -37,6 +37,7 @@ class SourceBatch(Boundary):
     framing_sha256: str
     framing: str
     encoding: Literal['ASCII'] = 'ASCII'
+    declared_format: dict[str, str]
     width: int | None
     status: Literal['accepted', 'refused']
     reasons: list[str]
@@ -126,6 +127,45 @@ class Approval(Boundary):
     actor: str
     reason: str
     approval_sha256: str
+
+class AnswerEvent(Boundary):
+    schema_version: Literal[1] = 1
+    generation_binding: str
+    question_id: str
+    option_id: str
+    actor: str
+    reason: str
+    expected_revision: int
+    request_id: str
+    revision: int
+    previous_event_id: str | None
+    old_option_id: str | None
+    semantic_target: str
+    source_sha256: str
+    generation_sha256: str
+    brief_sha256: str
+    policy_sha256: str
+    timestamp: str
+    event_id: str
+
+class MigrationBundle(Boundary):
+    schema_version: Literal[1] = 1
+    source_sha256: str
+    mapping_sha256: str
+    generation_binding: str
+    approval_sha256: str | None
+    config_sha256: str
+    supporting_event_ids: list[str]
+    producer_code_sha256: str
+    files: dict[str, str]
+    columns: list[str]
+    counts: dict[str, int]
+    record_count: int
+    mapping_status: Literal['complete','incomplete']
+    transformation_status: Literal['complete','partial','not_run','failed']
+    target_validation: Literal['not_run','passed','failed','indeterminate']
+    row_parity: Literal['not_run','exact','mismatch','incomplete']
+    bundle_sha256: str
 
 class Generation(Boundary):
     schema_version: Literal[1] = 1

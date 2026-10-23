@@ -25,6 +25,9 @@ def parser():
     q = sub.add_parser('ingest')
     q.add_argument('file'); q.add_argument('--input-root',default='.')
     q.add_argument('--brief',required=True); q.add_argument('--samples',required=True)
+    q.add_argument('--encoding',default='ASCII',help='declared encoding; only ASCII supported')
+    q.add_argument('--record-type','--record-family',default='fixed-width',help='declared family; mixed types refused')
+    q.add_argument('--numeric',default='ascii',help='declared representation; packed/zoned refused')
     q = sub.add_parser('hypothesize'); q.add_argument('run'); q.add_argument('--mode',choices=['rules','mock','live'],default='rules')
     q = sub.add_parser('questions'); q.add_argument('run')
     q = sub.add_parser('answer'); q.add_argument('run'); q.add_argument('question'); q.add_argument('option')
@@ -45,7 +48,8 @@ def execute(args):
         data=within(inputs,args.file,exists=True).read_bytes()
         brief=within(inputs,args.brief,exists=True).read_text(encoding='utf-8')
         samples=read(within(inputs,args.samples,exists=True))
-        batch=ingest_bytes(data,brief,samples)
+        batch=ingest_bytes(data,brief,samples,declared_encoding=args.encoding,
+            declared_record_type=args.record_type,declared_numeric=args.numeric)
         run_id=digest({'source':batch['source_sha256'],'brief':batch['brief_sha256'],'samples':batch['samples']['artifact_sha256'],'config':batch['config_sha256']})
         run=within(root,run_id)
         if run.exists():
