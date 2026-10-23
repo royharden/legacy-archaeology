@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "edition": "public-development-unsupported-v1",
+  "status": "not_run",
+  "fixtures": [
+    {"id":"ebcdic-01","declared_encoding":"EBCDIC","raw_hex":"f0f0f0f1c10a","expected":"batch_refusal","reason":"unsupported_encoding"},
+    {"id":"ebcdic-02","declared_encoding":"EBCDIC","raw_hex":"f0f0f0f2c20a","expected":"batch_refusal","reason":"unsupported_encoding"},
+    {"id":"packed-01","declared_numeric":"packed_decimal","raw_hex":"3030303101234c0a","expected":"batch_refusal","reason":"unsupported_packed_decimal"},
+    {"id":"packed-02","declared_numeric":"packed_decimal","raw_hex":"3030303205678d0a","expected":"batch_refusal","reason":"unsupported_packed_decimal"},
+    {"id":"mixed-01","declared_family":"mixed_record_type","raw_hex":"48303030310a44303030310a","expected":"batch_refusal","reason":"unsupported_record_family"},
+    {"id":"mixed-02","declared_family":"mixed_record_type","raw_hex":"44303030320a54303030320a","expected":"batch_refusal","reason":"unsupported_record_family"}
+  ]
+}
