@@ -32,18 +32,26 @@ def identity(value):
     return value
 
 
+def run_identity(batch):
+    value=dict(source=batch['source_sha256'],brief=batch['brief_sha256'],
+               samples=batch['samples']['artifact_sha256'],config=batch['config_sha256'])
+    stream=batch.get('intake',{}).get('stream_observation')
+    if stream: value['stream_observation_sha256']=stream['observation_sha256']
+    return digest(value)
+
+
 def load_run(root, run_id):
     run = within(root, identity(run_id), exists=True)
     batch = validate_batch(read(within(run, 'batch.json', exists=True), canonical_required=True))
-    data = bounded_bytes(within(run, 'source.dat', exists=True), limit=SOURCE_BYTES)
+    observed=batch.get('intake',{}).get('stream_observation')
+    data = None if observed else bounded_bytes(within(run, 'source.dat', exists=True), limit=SOURCE_BYTES)
     brief = bounded_bytes(within(run, 'brief.md', exists=True), limit=16000).decode('utf-8')
-    samples = read(within(run, 'samples.json', exists=True))
-    if sha256(data) != batch['source_sha256'] or sha256(brief.encode()) != batch['brief_sha256']:
+    samples = read(within(run, 'samples.json', exists=True),canonical_required=True)
+    if data is not None and sha256(data) != batch['source_sha256'] or sha256(brief.encode()) != batch['brief_sha256']:
         raise ValueError('retained source/brief identity changed; ingest a new run')
     if digest(samples) != batch['samples']['artifact_sha256']:
         raise ValueError('permitted sample artifact changed; ingest a new run')
-    expected = digest(dict(source=batch['source_sha256'], brief=batch['brief_sha256'],
-                           samples=batch['samples']['artifact_sha256'], config=batch['config_sha256']))
+    expected = run_identity(batch)
     if run_id != expected:
         raise ValueError('run identity mismatch')
     from la.ingest.evidence import verify_records
@@ -53,6 +61,17 @@ def load_run(root, run_id):
     expected_manifest = dict(schema_version=1, run=run_id, batch_sha256=digest(batch),
                              source_sha256=batch['source_sha256'], brief_sha256=batch['brief_sha256'],
                              samples_sha256=digest(samples), config_sha256=batch['config_sha256'])
+    if observed:
+        from la.ingest.observed import validate_observed_refusal
+        validate_observed_refusal(batch)
+        observation=read(within(run,'source-observation.json',exists=True),canonical_required=True)
+        if (observation.get('observation_sha256')!=digest({k:v for k,v in observation.items() if k!='observation_sha256'})
+                or observation.get('source_sha256')!=batch['source_sha256'] or observation.get('complete_stream') is not True
+                or observation.get('input_byte_count')!=observed['input_byte_count']
+                or observation.get('observed_count')!=observed['observed_count']
+                or observation.get('stable')!=observed['stable_claim']):
+            raise ValueError('retained stream observation lineage mismatch')
+        expected_manifest['source_observation_sha256']=digest(observation)
     if manifest != expected_manifest:
         raise ValueError('run manifest changed or interrupted intake; preserve bytes and ingest a fresh store')
     return run, batch, brief

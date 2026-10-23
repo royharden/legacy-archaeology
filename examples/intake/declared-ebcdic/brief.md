@@ -1,0 +1,1 @@
+Synthetic concepts: account_ref, description, balance, effective_date and status. No business interpretation has been established. Public teaching input for an explicitly unsupported declaration; preserve refusal instead of inventing values.

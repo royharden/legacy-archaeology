@@ -107,7 +107,9 @@ def observe_source(path):
         observed_count=lines+(1 if size and last!=10 else 0),
         terminal_newline=bool(size and last==10),stable=stable,
         complete_stream=True,retained=size<=SOURCE_BYTES and stable,
-        memory_limit_bytes=SOURCE_BYTES,chunk_bytes=64*1024)
+        memory_limit_bytes=SOURCE_BYTES,chunk_bytes=64*1024,
+        before_identity_sha256=digest(stamp(before)),after_identity_sha256=digest(stamp(current)),
+        reader_policy_sha256=digest({'version':1,'chunk_bytes':64*1024,'memory_limit_bytes':SOURCE_BYTES,'complete_stream_hash':True}))
     observation['observation_sha256']=digest(observation)
     return (bytes(buffered) if observation['retained'] else None),observation
 
@@ -195,7 +197,10 @@ def run_lock(root, run):
 
 def pointer_token(path):
     path = Path(path)
-    return digest(bounded_json(path, limit=POINTER_BYTES, canonical_required=True)) if path.exists() else None
+    if not path.exists(): return None
+    try: return digest(bounded_json(path, limit=POINTER_BYTES, canonical_required=True))
+    except ValueError:
+        return 'raw:'+sha256(bounded_bytes(path,limit=POINTER_BYTES))
 
 
 def replace_pointer(path, value, *, expected=UNSET):
@@ -203,10 +208,12 @@ def replace_pointer(path, value, *, expected=UNSET):
     data = canonical(value)+b'\n'
     if len(data) > POINTER_BYTES: raise ValueError('pointer byte limit')
     with file_lock(path.with_name('.'+path.name+'.lock')):
-        current = bounded_json(path, limit=POINTER_BYTES, canonical_required=True) if path.exists() else None
+        exists=path.exists()
+        try: current = bounded_json(path, limit=POINTER_BYTES, canonical_required=True) if exists else None
+        except ValueError: current=UNSET
         if current == value: return  # Exact retry has no second effect.
-        actual = digest(current) if current is not None else None
-        if expected is UNSET and current is not None or expected is not UNSET and expected != actual:
+        actual = pointer_token(path)
+        if expected is UNSET and exists or expected is not UNSET and expected != actual:
             raise ValueError('content-bound pointer CAS failed')
         stage = _stage(path, data, POINTER_BYTES)
         try:
@@ -235,7 +242,7 @@ def atomic_directory(stage, destination):
     stage, destination = Path(stage), Path(destination)
     parent = destination.parent.resolve()
     if (stage.is_symlink() or destination.is_symlink() or stage.parent.resolve() != parent
-            or not stage.name.startswith('.'+destination.name+'.la-tmp-')):
+            or not (stage.name.startswith('.'+destination.name+'.la-tmp-') or stage.name.startswith('.bundle-stage.la-tmp-'))):
         raise ValueError('directory publication outside owned stage')
     with file_lock(destination.with_name('.'+destination.name+'.publish.lock')):
         if destination.exists(): raise ValueError('immutable directory already published; verify exact retry')

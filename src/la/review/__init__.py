@@ -106,7 +106,11 @@ class RulingStore:
 
     def _current_state_locked(self, db):
         row = db.execute('SELECT binding,epoch,state_revision,generation FROM active WHERE singleton=1').fetchone()
-        head = db.execute('SELECT sequence,event_id FROM events ORDER BY sequence DESC LIMIT 1').fetchone()
+        head = db.execute('SELECT sequence,event_id,payload FROM events ORDER BY sequence DESC LIMIT 1').fetchone()
+        if head:
+            head_event = AnswerEvent.model_validate(json.loads(head[2])).model_dump()
+            if head_event['event_id'] != head[1] or digest({k: v for k, v in head_event.items() if k != 'event_id'}) != head[1]:
+                raise ValueError('committed journal head identity mismatch')
         generation, dependency, epoch, revision = None, None, 0, 0
         status = 'unbound'
         if row:
@@ -394,3 +398,6 @@ def build_mapping(batch: dict, generation: dict, rulings) -> dict:
                'unresolved': sorted(set(unresolved))}
     mapping['mapping_sha256'] = digest(mapping)
     return MappingSpec.model_validate(mapping).model_dump()
+
+
+from .context import question_context

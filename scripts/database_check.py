@@ -17,6 +17,7 @@ if __name__ == '__main__':
     if args.authority: argv.extend(['--authority',args.authority])
     if args.target_config: argv.extend(['--target-config',args.target_config])
     try:
-        print(json.dumps(execute(parser().parse_args(argv)),indent=2))
+        from la.app.cli import emit_result
+        emit_result(execute(parser().parse_args(argv)))
     except (ValueError,OSError,KeyError,TypeError) as exc:
         raise SystemExit('database-check: '+type(exc).__name__) from None

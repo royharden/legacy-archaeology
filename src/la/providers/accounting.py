@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 from la.contracts import canonical, digest
+from .wire import request_pins,settlement_fields
 
 
 def amount(value) -> Decimal:
@@ -38,6 +40,11 @@ class CallLedger:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.is_symlink(): raise ValueError('accounting authority symlink refused')
+        if self.path.exists():
+            info=self.path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size>32*1024*1024:
+                raise ValueError('accounting authority storage limit; preserve liabilities for authorized archival')
         with self.connection() as db:
             legacy = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='calls'").fetchone()
             if legacy and db.execute('SELECT count(*) FROM calls').fetchone()[0]:
@@ -69,7 +76,8 @@ class CallLedger:
                    (attempt, canonical(event).decode()))
 
     def reserve(self, *, run, method, reserve, cap, pins) -> dict:
-        if method not in ('B1', 'rank') or not isinstance(run, str) or not run:
+        request_pins(pins,accounting=True)
+        if method not in ('B1', 'rank') or type(run) is not str or not run or len(run)>1024:
             raise ValueError('run and known provider method required')
         reserve, cap = amount(reserve), amount(cap)
         if cap == 0 or reserve > cap:
@@ -98,6 +106,7 @@ class CallLedger:
         return receipt
 
     def finish(self, reservation, *, status, cost=None, **fields) -> dict:
+        settlement_fields(fields)
         if status not in ('completed', 'not_sent', 'unknown_liability'):
             raise ValueError('invalid settlement status')
         known = cost is not None

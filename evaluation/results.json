@@ -24,5 +24,8 @@
   "scorer_version": "semantic-v2",
   "regression_source": {"path":"tests/evaluation", "execution":"not_run", "collection":"not_run"},
   "public_fixture_edition": "public-development-v2",
+  "custody_enforcement_source": {"contracts":"T0/T2/T3 closed", "verifier":"Ed25519 source only", "registry":"not_opened", "canary_probes":"not_run", "actual_isolation":"unverified"},
+  "target_effects_grading_source": {"wire":"D5 v2", "execution":"not_run", "full_target_acceptance":"pending"},
+  "public_t1_source": {"scope":"public development/validation only", "authority":"Ed25519 source", "billing":"actual D7 pricing port/receipt", "execution":"not_run", "hidden_permission":false},
   "limitations": ["public fixture is development only", "no independent oracle/scorer audit", "no fresh hidden edition", "no target readback"]
 }

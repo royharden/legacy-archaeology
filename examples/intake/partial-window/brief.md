@@ -1,0 +1,1 @@
+Synthetic byte evidence may concern account_ref, description, balance, effective_date and status. Business meanings and layout remain unconfirmed. Status vocabulary is not supplied. Preserve unknown when the offered evidence cannot decide. All bytes are public teaching material; sample authorization still limits downstream exposure.

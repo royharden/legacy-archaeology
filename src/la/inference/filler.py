@@ -1,6 +1,7 @@
 """Explicit filler declarations; empty-looking bytes never approve themselves."""
 from copy import deepcopy
 from la.contracts import digest, validate_batch, validate_generation
+from la.contracts.evidence import validate_discovery_metadata
 from la.ingest.evidence import make_evidence, verify_records
 
 
@@ -55,6 +56,7 @@ def declare_filler(batch: dict, generation: dict, spans: list[dict], *, actor: s
     discovery = value.setdefault('discovery', {})
     discovery['filler_declaration'] = decision
     discovery['discovery_sha256'] = digest({key: item for key, item in discovery.items() if key != 'discovery_sha256'})
+    value['discovery'] = validate_discovery_metadata(discovery)
     value['policy_sha256'] = digest({'prior_policy_sha256': generation['policy_sha256'],
                                      'filler_declaration_sha256': decision['declaration_sha256']})
     value['generation_sha256'] = digest({key: item for key, item in value.items() if key != 'generation_sha256'})

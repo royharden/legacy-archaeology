@@ -25,7 +25,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_emitted_metadata_and_filler_participate_in_hash(self):
         """what_bug_this_catches: new diagnostics/filler escaped generation binding."""
-        value = generation(discovery={'observed': 7}, filler=[{'start': 2, 'end': 3}])
+        value = generation(discovery={}, filler=[{'start': 2, 'end': 3}])
         validated = validate_generation(value)
         self.assertEqual(validated, value)
         mutated = deepcopy(value); mutated['filler'][0]['end'] = 4
@@ -65,9 +65,10 @@ class BoundaryTests(unittest.TestCase):
         """what_bug_this_catches: optional source diagnostics silently materialize in old pins."""
         value = dict(schema_version=1, source_sha256='1'*64, framing_sha256='2'*64, framing='unresolved',
             encoding='ASCII', declared_format={'encoding':'ASCII'}, width=None, status='refused', reasons=['empty_input'],
-            records=[], brief_sha256='3'*64, samples={}, config_sha256='4'*64)
+            records=[], brief_sha256='3'*64, samples=dict(authorization='',artifact_sha256=None,
+                records=[],selected_ordinals=[],truncated=False), config_sha256='4'*64)
         self.assertEqual(validate_batch(value),value)
-        emitted = dict(value,intake={'observed_record_count':10001,'materialized_record_count':0})
+        emitted = dict(value,intake={})
         self.assertEqual(validate_batch(emitted),emitted)
 
     def test_inference_wheel_has_no_evaluator_module_or_import(self):

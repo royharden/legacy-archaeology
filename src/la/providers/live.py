@@ -9,6 +9,7 @@ import time
 import urllib.request
 from la.contracts import canonical, digest, sha256
 from la.providers.accounting import CallLedger, amount
+from .wire import request_pins
 
 
 def validate_config(config):
@@ -22,7 +23,7 @@ def validate_config(config):
     if config['authorized'] is not True or config['activation_verified'] is not True:
         raise ValueError('live activation unapproved; live never falls back to mock')
     for key in ('authority_id', 'model', 'model_version', 'price_version', 'price_evidence_date', 'api_version_pin'):
-        if type(config[key]) is not str or not config[key].strip():
+        if type(config[key]) is not str or not config[key].strip() or len(config[key])>256:
             raise ValueError('nonempty authority/model/version/price pins required')
     pin = config['price_evidence_sha256']
     if type(pin) is not str or len(pin) != 64 or any(c not in '0123456789abcdef' for c in pin):
@@ -32,6 +33,9 @@ def validate_config(config):
     if type(config['max_output_tokens']) is not int or not 1 <= config['max_output_tokens'] <= 2000:
         raise ValueError('output token bound exceeds plan')
     prices = [amount(config[key]) for key in ('input_usd_per_million', 'cached_input_usd_per_million', 'output_usd_per_million')]
+    from datetime import date
+    try: date.fromisoformat(config['price_evidence_date'])
+    except ValueError: raise ValueError('ISO pricing evidence date required') from None
     if prices[1] > prices[0] or amount(config['total_cap_usd']) == 0:
         raise ValueError('cached price/cap invalid')
     return config
@@ -87,6 +91,7 @@ class MissingCredential(ValueError):
 
 def generate_once(prompt: str, config: dict, ledger_path, *, run: str, method: str, pins=None, transport=None) -> dict:
     config = validate_config(config)
+    request_pins(pins)
     if type(prompt) is not str or not 0 < len(prompt.encode()) <= min(8000, config['max_input_tokens']):
         raise ValueError('conservative UTF-8 byte/token request bound exceeded')
     # Never pass arbitrary caller text as an allowlisted product request.

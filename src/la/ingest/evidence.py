@@ -1,5 +1,8 @@
 """Exact source evidence and fail-closed permitted-sample authorization."""
 from la.contracts import digest, sha256
+from la.contracts.evidence import (validate_sample_artifact, validate_sample_metadata,
+                                   validate_intake_metadata, validate_span_evidence)
+from .observed import validate_observed_refusal
 
 REF_KEYS = ('source_sha256', 'framing_sha256', 'ordinal', 'byte_start', 'length', 'raw_sha256')
 SAMPLE_KEYS = set(REF_KEYS) | {'raw_hex', 'start', 'end', 'record_ref', 'span'}
@@ -7,6 +10,8 @@ ARTIFACT_KEYS = {'schema_version', 'source_sha256', 'framing_sha256', 'authoriza
 
 
 def verify_records(batch: dict, source: bytes | None = None) -> None:
+    validate_sample_metadata(batch['samples'])
+    validate_intake_metadata(batch.get('intake', {}))
     if source is not None and sha256(source) != batch['source_sha256']:
         raise ValueError('source identity mismatch')
     cursor = 0
@@ -24,6 +29,14 @@ def verify_records(batch: dict, source: bytes | None = None) -> None:
     intake = batch.get('samples', {}).get('intake')
     if batch.get('intake') and batch['intake'] != intake:
         raise ValueError('intake metadata copies differ')
+    if intake and ('stream_observation' in intake or intake.get('framing_policy', {}).get('kind') == 'unmaterialized_stream_refusal'):
+        observation = validate_observed_refusal(batch)
+        if source is not None:
+            count = source.count(b'\n') + int(bool(source) and not source.endswith(b'\n'))
+            if (len(source) != observation['input_byte_count']
+                    or observation['observed_count'] is not None and count != observation['observed_count']
+                    or observation['terminal_newline'] is not None and source.endswith(b'\n') != observation['terminal_newline']):
+                raise ValueError('provided bytes contradict stream observation counts')
     if intake:
         if digest(intake['framing_policy']) != batch['framing_sha256']:
             raise ValueError('framing policy identity mismatch')
@@ -41,6 +54,7 @@ def verify_records(batch: dict, source: bytes | None = None) -> None:
 
 
 def resolve_evidence(batch: dict, evidence: dict, *, source: bytes | None = None, require_authorized=False) -> bytes:
+    evidence = validate_span_evidence(evidence)
     verify_records(batch, source)
     ordinal = evidence.get('ordinal')
     if type(ordinal) is not int or not 0 <= ordinal < len(batch['records']): raise ValueError('evidence ordinal invalid')
@@ -84,6 +98,10 @@ def make_evidence(batch: dict, ordinal: int, start: int, end: int) -> dict:
 
 def authorize_samples(batch: dict, artifact: dict) -> tuple[dict, list[str]]:
     reasons, authorized = [], []
+    try:
+        validate_sample_artifact(artifact)
+    except ValueError:
+        reasons.append('sample_protocol_invalid')
     if not isinstance(artifact, dict): artifact = {}; reasons.append('sample_artifact_invalid')
     if set(artifact) - ARTIFACT_KEYS: reasons.append('sample_extra_fields')
     if type(artifact.get('schema_version', 1)) is not int or artifact.get('schema_version', 1) != 1:
@@ -142,10 +160,10 @@ def authorize_samples(batch: dict, artifact: dict) -> tuple[dict, list[str]]:
         selected.append(item); ordinals.add(item['ordinal']); used += item['end'] - item['start']
     whole = [batch['records'][item['ordinal']] for item in selected
              if item['start'] == 0 and item['end'] == batch['records'][item['ordinal']]['length']]
-    value = {'authorization': authorization if isinstance(authorization, str) else '',
+    value = {'authorization': authorization if isinstance(authorization, str) and len(authorization) <= 1000 else '',
              'artifact_sha256': digest(artifact), 'content_sha256': content_hash, 'records': whole,
              'authorized_spans': selected, 'selected_ordinals': sorted(ordinals),
              'selected_artifact_indices': [item['artifact_index'] for item in selected],
              'authorized_count': len(authorized), 'selected_byte_count': used, 'truncated': len(selected) < len(authorized),
              'selection_policy': 'ordinal-span-v1', 'selection_sha256': digest(selected)}
-    return value, sorted(set(reasons))
+    return validate_sample_metadata(value), sorted(set(reasons))

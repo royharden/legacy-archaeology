@@ -17,14 +17,31 @@ def parser():
     sub = p.add_subparsers(dest='command', required=True)
     q = sub.add_parser('parity'); q.add_argument('--evidence', required=True)
     q = sub.add_parser('target'); q.add_argument('--evidence', required=True)
+    q=sub.add_parser('target-effects'); q.add_argument('--evidence',required=True)
+    q=sub.add_parser('prepare-target'); q.add_argument('--evidence',required=True)
     q = sub.add_parser('replay'); q.add_argument('--evidence', required=True)
+    q.add_argument('--registry',help='required actual evaluator registry for retired hidden replay')
     q = sub.add_parser('suite')
-    q.add_argument('--cases', required=True); q.add_argument('--ports', required=True, help='trusted module:factory(context) -> RunnerPorts')
+    sources=q.add_mutually_exclusive_group(required=True)
+    sources.add_argument('--cases'); sources.add_argument('--public-development',action='store_true')
+    q.add_argument('--ports',default='scripts.product_ports:factory',help='trusted module:factory(context) -> RunnerPorts')
     q.add_argument('--config', required=True, help='non-secret factory context/pins/authority/freeze/custody packet')
     q.add_argument('--mode', choices=['rules', 'mock', 'live'], default='mock')
     q.add_argument('--split', choices=['development', 'validation', 'heldout'], default='development')
     q.add_argument('--evaluator-authorized', action='store_true')
+    q.add_argument('--eligibility-factory',default='scripts.eligibility_factory:factory',help='trusted evaluator-owned module:factory; no JSON custody shortcuts')
+    q.add_argument('--public-trust-root'); q.add_argument('--public-trust-profile')
+    q.add_argument('--target-factory',help='explicit evaluator-owned module:factory returning D6 TargetPorts')
     q = sub.add_parser('public-corpus'); q.add_argument('variant')
+    q=sub.add_parser('public-catalog'); q.add_argument('--nonce',required=True); q.add_argument('--corpus-commitment-sha256')
+    for name in ('edition-register','edition-freeze','edition-state','edition-export','edition-disposition'):
+        q=sub.add_parser(name); q.add_argument('--registry',required=True)
+        if name in ('edition-register','edition-freeze','edition-disposition'):
+            q.add_argument('--packet',required=True); q.add_argument('--request-id',required=True); q.add_argument('--expected-head')
+        if name in ('edition-state','edition-disposition'): q.add_argument('--edition',required=True)
+        if name=='edition-disposition':
+            q.add_argument('--action',choices=['exposed','retired'],required=True)
+            q.add_argument('--public-trust-root',required=True); q.add_argument('--public-trust-profile',required=True)
     sub.add_parser('contract')
     return p
 
@@ -43,24 +60,69 @@ def execute(args):
     config = {}
     if args.command == 'suite':
         config = read(within(root, args.config, exists=True))
-        if args.mode == 'live' or args.split == 'heldout':
-            from evaluation.benchmark import hidden_run_eligibility
-            eligible = hidden_run_eligibility(config.get('freeze'), config.get('custody'))
-            if not args.evaluator_authorized or not eligible['eligible'] or config.get('authority', {}).get('authorized') is not True:
-                raise ValueError('explicit external evaluator authority, freeze and custody required before case access')
+        if (args.mode == 'live' or args.split == 'heldout') and (
+                not args.evaluator_authorized or not args.eligibility_factory or not args.public_trust_root or not args.public_trust_profile):
+            raise ValueError('explicit evaluator authority and trusted signed-observation eligibility factory required before case access')
     capture_root = within(root, args.out)
     capture_root.mkdir(parents=True, exist_ok=True)
     store = CaptureStore(capture_root)
+    eligibility=None
+    if args.command=='suite' and (args.mode=='live' or args.split=='heldout'):
+        from evaluation.edition_registry import EligibilityContext
+        from evaluation.public_live import PublicLiveContext
+        module,separator,symbol=args.eligibility_factory.partition(':')
+        if not separator: raise ValueError('trusted eligibility module:factory required')
+        eligibility=getattr(importlib.import_module(module),symbol)(
+            {'store':store,'evidence_root':root,'packet':config.get('eligibility_context',{}),
+             'public_trust_root':args.public_trust_root,'public_trust_profile':args.public_trust_profile,
+             'billing_config':config.get('port_context',{}).get('provider_config')})
+        if type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        eligibility.validate()
+        expected_freeze=None if type(eligibility) is PublicLiveContext else eligibility.freeze
+        if eligibility.registry.store.root!=store.root or expected_freeze!=config.get('freeze'):
+            raise ValueError('eligibility capture root/freeze mismatch')
+        if type(eligibility) is PublicLiveContext and args.split=='heldout': raise ValueError('T1 public context grants no hidden access')
+    if args.command.startswith('edition-'):
+        from evaluation.edition_registry import EditionRegistry
+        registry=EditionRegistry(within(root,args.registry,exists=args.command not in ('edition-register',)),store)
+        if args.command=='edition-state': return registry.state(args.edition)
+        if args.command=='edition-export': return {'head':registry.head,'event_captures':registry.export()}
+        packet=read(within(root,args.packet,exists=True))
+        if packet.get('kind')=='public-catalog':
+            from la.contracts import digest
+            if packet.get('receipt_sha256')!=digest({k:v for k,v in packet.items() if k not in ('receipt_sha256','path')}):
+                raise ValueError('public catalog wrapper identity mismatch')
+            packet=packet['payload']
+        if args.command=='edition-register':
+            result=(registry.register_public if packet.get('stage')=='T1' else registry.register)(
+                packet,request_id=args.request_id,expected_head=args.expected_head)
+        elif args.command=='edition-freeze': result=registry.freeze(packet,request_id=args.request_id,expected_head=args.expected_head)
+        else:
+            from evaluation.eligibility import ReceiptVerifier
+            from la.app.public_trust import public_keys
+            result=registry.disposition(args.edition,args.action,packet,
+                verifier=ReceiptVerifier(*public_keys(args.public_trust_root,args.public_trust_profile)),
+                request_id=args.request_id,expected_head=args.expected_head)
+        return {'event':result.event,'capture':result.capture,'newly_created':result.newly_created,'head':registry.head}
+    if args.command=='public-catalog':
+        from evaluation.public_live import make_public_catalog
+        cases=public_cases()
+        catalog=make_public_catalog(cases,nonce=args.nonce,corpus_commitment_sha256=args.corpus_commitment_sha256)
+        return receipt(capture_root,'public-catalog',catalog)
     if args.command == 'public-corpus':
         from evaluation.corpus import build_development_variant, capture_public_variant
         corpus = build_development_variant(args.variant)
         return dict(corpus=capture_public_variant(store, corpus), benchmark_status='not_run')
     if args.command == 'suite':
         from evaluation.runner import BatchCase, VariantCase, RunnerPorts, run_suite
-        raw = read(within(root, args.cases, exists=True))
-        cases = [VariantCase(item['variant_id'], args.split, item['edition'], item['visible'],
-            tuple(BatchCase(batch['batch_id'], batch['visible'], batch['oracle']) for batch in item['batches']),
-            item.get('accepted_choices', {}), item.get('expected_layout')) for item in raw['variants']]
+        if args.public_development:
+            if args.split!='development': raise ValueError('built-in corpus is public development only')
+            cases=public_cases()
+        else:
+            raw = read(within(root, args.cases, exists=True))
+            cases = [VariantCase(item['variant_id'], args.split, item['edition'], item['visible'],
+                tuple(BatchCase(batch['batch_id'], batch['visible'], batch['oracle']) for batch in item['batches']),
+                item.get('accepted_choices', {}), item.get('expected_layout')) for item in raw['variants']]
         module, separator, symbol = args.ports.partition(':')
         if not separator or not module or not symbol:
             raise ValueError('explicit trusted ports module:factory required')
@@ -70,21 +132,60 @@ def execute(args):
         forbidden = {'oracle', 'oracle_records', 'accepted_choices', 'expected_layout', 'cases', 'custody'}
         if set(context) & forbidden:
             raise ValueError('factory context must not contain evaluator-only inputs')
-        ports = getattr(importlib.import_module(module), symbol)(context)
+        selected_factory=getattr(importlib.import_module(module),symbol)
+        if args.ports=='scripts.product_ports:factory':
+            from evaluation.public_live import PublicLiveContext
+            signed_provider=eligibility.validate() if type(eligibility) is PublicLiveContext else None
+            ports=selected_factory(context,provider_authority=signed_provider)
+        else: ports=selected_factory(context)
         if not isinstance(ports, RunnerPorts): raise ValueError('factory must supply actual RunnerPorts')
+        target_ports=None
+        if args.target_factory:
+            from evaluation.target_runner import TargetPorts
+            module,separator,symbol=args.target_factory.partition(':')
+            if not separator: raise ValueError('explicit target module:factory required')
+            target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
+            if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
         result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
-            authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'))
+            authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
+            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=config.get('expected_registry_head'),
+            target_ports=target_ports,target_freeze_sha256=config.get('target_freeze_sha256'))
         return receipt(capture_root, 'evaluation', dict(edition=cases[0].edition, result=result,
             benchmark_status=result['summary']['benchmark_status'], product_acceptance='pending'))
     evidence = read(within(root, args.evidence, exists=True))
     if args.command == 'replay':
         from evaluation.runner import replay_archive
+        from evaluation.edition_registry import EditionRegistry
+        registry=EditionRegistry(within(root,args.registry,exists=True),store) if args.registry else None
         return replay_archive(store, evidence['manifest_ref'], evidence['oracle_records'],
-                              retirement_ref=evidence.get('retirement_ref'))
+                              retirement_ref=evidence.get('retirement_ref'),registry=registry)
     # Direct projections are public only. Hidden replay requires sealed capture
     # and retirement verification through replay_archive, never a truthy label.
-    if evidence.get('split', 'development') != 'development':
+    if args.command!='prepare-target' and evidence.get('split', 'development') != 'development':
         raise ValueError('direct scoring requires public development evidence; use retired capture replay')
+    if args.command=='prepare-target':
+        required={'schema_version','split','visible','mapping','method','edition','freeze_sha256'}
+        phase_keys={'evaluation_phase','evaluation_plan_sha256'}
+        if set(evidence) not in (required,required|phase_keys) or evidence['split'] not in ('development','validation'):
+            raise ValueError('closed public visible/proposal target preparation packet required; no gold')
+        from scripts.target_ports import prepare
+        phase=({k:evidence[k] for k in phase_keys|{'split','freeze_sha256'}} if phase_keys<=set(evidence) else None)
+        artifact=prepare(evidence['visible'],evidence['mapping'],evidence['method'],evidence['edition'],
+                         evidence['freeze_sha256'],phase_scope=phase)
+        return receipt(capture_root,'evaluation-candidate',artifact)
+    if args.command=='target-effects':
+        from evaluation.target_effects import TargetExpectation,grade_target
+        values=evidence['expectation']
+        if 'required_negatives' in values: values['required_negatives']=tuple(values['required_negatives'])
+        expectation=TargetExpectation(**values).validate()
+        observation=observation_from(evidence.get('observation'))
+        result=grade_target(evidence['oracle_records'],observation,expectation=expectation,
+            prior=observation_from(evidence.get('prior')),failed_load=observation_from(evidence.get('failed_load')),
+            recovery_observation=observation_from(evidence.get('recovery_observation')),edition=evidence.get('edition','development'))
+        result['row_parity']='not_run' if result['target_validation']=='not_run' else result['score']['row_parity']
+        return receipt(capture_root,'evaluation',dict(source_sha256=expectation.candidate['source_sha256'],
+            mapping_sha256=expectation.candidate['mapping_sha256'],candidate_sha256=expectation.candidate['candidate_sha256'],
+            edition=evidence.get('edition','development'),operation='target',result=result,product_acceptance='pending'))
     if args.command == 'parity':
         from evaluation.scorer import score_product
         result = score_product(evidence['oracle_records'], evidence['outcomes'], evidence['mapping'],
@@ -117,9 +218,25 @@ def digest_receipt(value):
     return digest({k:v for k,v in value.items() if k != 'receipt_sha256'})
 
 
+def observation_from(value):
+    if value is None: return None
+    if type(value) is dict and value.get('kind')=='target-observation':
+        if set(value)!={'schema_version','kind','payload','receipt_sha256'} or digest_receipt(value)!=value['receipt_sha256']:
+            raise ValueError('immutable target-observation wrapper mismatch')
+        return value['payload']['observation']
+    return value
+
+
+def public_cases():
+    """Only public canonical-first generator source; never called in construction."""
+    from evaluation.corpus import development_layouts,build_development_variant,variant_case
+    return [variant_case(build_development_variant(layout['variant_id'])) for layout in development_layouts()]
+
+
 def main():
     try:
-        print(json.dumps(execute(parser().parse_args()), indent=2, ensure_ascii=False))
+        from la.app.cli import emit_result
+        emit_result(execute(parser().parse_args()))
     except (ValueError, OSError, KeyError, TypeError, ImportError, AttributeError) as exc:
         # External callbacks can contain secrets in exception messages.
         raise SystemExit('la_eval: '+type(exc).__name__+'; inspect local non-secret input contracts') from None

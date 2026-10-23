@@ -8,6 +8,7 @@ storage and establish that custody separately before any hidden attempt.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
@@ -36,12 +37,20 @@ class EditionRegistry:
             db.execute('CREATE TABLE IF NOT EXISTS edition_events (sequence INTEGER PRIMARY KEY, '
                        'event_sha256 TEXT UNIQUE NOT NULL, request_id TEXT UNIQUE NOT NULL, event_json TEXT NOT NULL)')
 
+    @contextmanager
     def _connect(self):
         if self.path.is_symlink():
             raise ValueError('registry symlink rejected')
         db = sqlite3.connect(self.path, timeout=5)
-        db.execute('PRAGMA synchronous=FULL')
-        return db
+        try:
+            db.execute('PRAGMA synchronous=FULL')
+            yield db
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def _events(self, db) -> list[dict]:
         events, previous = [], None
@@ -71,13 +80,17 @@ class EditionRegistry:
         return events[-1]['event_sha256'] if events else None
 
     def _state(self, events: list[dict], edition: str) -> dict:
-        state = {'commitment': None, 'freeze': None, 'exposed': False, 'retired': False, 'attempt': None}
+        state = {'commitment': None, 'freeze': None, 'exposed': False, 'retired': False, 'attempt': None, 't1': None}
         for event in events:
             if event['edition'] != edition:
                 continue
             kind, payload = event['event_type'], event['payload']
+            if kind.startswith('t1_') or state['t1'] is not None:
+                from .public_live import fold_public_event
+                if fold_public_event(state, event):
+                    continue
             if kind == 'registered':
-                if state['commitment'] is not None:
+                if state['commitment'] is not None or state['t1'] is not None:
                     raise ValueError('edition registered twice')
                 state['commitment'] = validate_commitment(payload)
             elif state['commitment'] is None:
@@ -93,13 +106,46 @@ class EditionRegistry:
                 validate_suite(payload['suite'], state['commitment'], state['freeze'])
                 if not is_sha(payload['authority_sha256']) or not is_sha(payload['custody_sha256']):
                     raise ValueError('attempt missing authority/custody pins')
-                state['attempt'] = {'suite': payload['suite'], 'status': 'running', 'event_sha256': event['event_sha256']}
+                state['attempt'] = {'suite': payload['suite'], 'status': 'running',
+                                    'event_sha256': event['event_sha256'], 'arms': {}}
+            elif kind in ('arm_started', 'arm_finished'):
+                expected = {'attempt_id', 'variant_id', 'method'}
+                if kind == 'arm_finished':
+                    expected |= {'status', 'capture'}
+                closed(payload, expected, 'arm transition')
+                attempt = state['attempt']
+                if (attempt is None or attempt['status'] != 'running'
+                        or payload['attempt_id'] != attempt['suite']['attempt_id']
+                        or payload['variant_id'] not in attempt['suite']['variant_ids']
+                        or payload['method'] not in attempt['suite']['methods']):
+                    raise ValueError('arm outside the active exact predeclared suite')
+                key = digest({'variant_id': payload['variant_id'], 'method': payload['method']})
+                if kind == 'arm_started':
+                    if state['exposed'] or state['retired']:
+                        raise ValueError('exposed/retired edition cannot start another arm')
+                    if key in attempt['arms']:
+                        raise ValueError('duplicate arm execution forbidden')
+                    attempt['arms'][key] = {'status': 'running'}
+                else:
+                    if key not in attempt['arms'] or attempt['arms'][key]['status'] != 'running':
+                        raise ValueError('arm finish lacks its unique start')
+                    if payload['status'] not in ('completed', 'partial', 'failed', 'abstained'):
+                        raise ValueError('unknown arm terminal state')
+                    closed(payload['capture'], {'sha256', 'kind', 'bytes'}, 'arm result capture')
+                    attempt['arms'][key] = {'status': payload['status'], 'capture': payload['capture']}
             elif kind == 'attempt_finished':
                 closed(payload, {'attempt_id', 'status', 'result_capture'}, 'attempt finish')
                 if (state['attempt'] is None or state['attempt']['status'] != 'running'
                         or payload['attempt_id'] != state['attempt']['suite']['attempt_id'] or payload['status'] not in TERMINAL):
                     raise ValueError('invalid terminal attempt transition')
                 closed(payload['result_capture'], {'sha256', 'kind', 'bytes'}, 'terminal capture')
+                if payload['status'] == 'completed':
+                    if state['exposed'] or state['retired']:
+                        raise ValueError('exposed/retired suite cannot claim completed custody')
+                    required = len(state['attempt']['suite']['methods']) * len(state['attempt']['suite']['variant_ids'])
+                    if (len(state['attempt']['arms']) != required or
+                            any(arm['status'] != 'completed' for arm in state['attempt']['arms'].values())):
+                        raise ValueError('completed suite requires every unique predeclared arm result')
                 state['attempt']['status'] = payload['status']
                 state['attempt']['result_capture'] = payload['result_capture']
             elif kind in ('exposed', 'retired'):
@@ -137,14 +183,30 @@ class EditionRegistry:
                          'edition': edition, 'event_type': kind, 'request_id': request_id,
                          'request_sha256': request_sha, 'payload': payload}
                 event['event_sha256'] = digest(event)
+                if kind in ('t1_attempt_started', 't1_arm_started', 't1_request_reserved', 't1_selected'):
+                    public = self._state(events, edition)['t1']
+                    if public is None: raise ValueError('public phase registration missing')
+                    self.check_t1_chronology(public['catalog'], events=events)
+                if kind in ('t1_attempt_started', 't1_request_reserved'):
+                    self.assert_no_unknown_public_liability(events=events)
+                if kind == 'frozen':
+                    self.check_freeze_chronology(payload, events)
                 self._state(events + [event], edition)  # Reject illegal state before durable mutation.
                 if kind == 'registered':
                     new = validate_commitment(payload)
                     heldout_gold = {v['canonical_sha256'] for v in new['variants'] if v['split'] == 'heldout'}
+                    public_gold = {v['canonical_sha256'] for v in new['variants'] if v['split'] != 'heldout'}
+                    if heldout_gold & public_gold:
+                        raise ValueError('heldout gold already appears in this family public splits')
                     for old in events:
+                        if old['event_type'] == 't1_registered':
+                            if heldout_gold & {variant['canonical_sha256'] for variant in old['payload']['variants']}:
+                                raise ValueError('public/retired T1 gold cannot become hidden')
                         if old['event_type'] != 'registered':
                             continue
                         prior = self._state(events, old['edition'])
+                        if new['nonce'] == prior['commitment']['nonce']:
+                            raise ValueError('edition nonce already used')
                         if prior['exposed'] or prior['retired'] or prior['attempt'] is not None:
                             exposed_gold = {v['canonical_sha256'] for v in prior['commitment']['variants']}
                         else:
@@ -165,7 +227,52 @@ class EditionRegistry:
     def freeze(self, freeze: dict, *, request_id: str, expected_head: str | None) -> JournalReceipt:
         state = self.state(freeze['edition'])
         item = validate_freeze(freeze, state['commitment'])
+        self.check_freeze_chronology(item, self.events())
         return self._append(item['edition'], 'frozen', item, request_id=request_id, expected_head=expected_head)
+
+    def check_freeze_chronology(self, item, events):
+        for event in events:
+            if event['event_type'] == 't1_registered' and event['payload']['corpus_commitment_sha256'] == item['commitment_sha256']:
+                public = self._state(events, event['edition'])['t1']
+                if any(a['status'] == 'running' for a in public['attempts'].values()):
+                    raise ValueError('finish linked public T1 attempts before T2 freeze')
+        if 'selection_sha256' in item:
+            selections = [event for event in events if event['event_type'] == 't1_selected'
+                          and event['payload']['selection_sha256'] == item['selection_sha256']]
+            if len(selections) != 1 or selections[0]['payload']['pins'] != item['pins']:
+                raise ValueError('T2 does not match actual committed T1 selection')
+            public = self._state(events, selections[0]['edition'])['t1']
+            if public['catalog']['corpus_commitment_sha256'] != item['commitment_sha256']:
+                raise ValueError('T1 selection was not linked to pre-tuning T0')
+    def register_public(self, catalog, *, request_id, expected_head):
+        from .public_live import validate_catalog
+        item = validate_catalog(catalog)
+        self.check_t1_chronology(item)
+        return self._append(item['edition'], 't1_registered', item, request_id=request_id, expected_head=expected_head)
+
+    def check_t1_chronology(self, catalog, *, events=None):
+        pin = catalog['corpus_commitment_sha256']
+        if pin is None:
+            return  # Explicit public exploratory trial, not eligible for hidden promotion.
+        events = self.events() if events is None else events
+        sealed = next((event for event in events if event['event_type'] == 'registered'
+                       and event['payload']['commitment_sha256'] == pin), None)
+        if sealed is None:
+            raise ValueError('linked T0 must be sealed before public tuning')
+        state = self._state(events, sealed['edition'])
+        if state['freeze'] is not None or state['attempt'] is not None or state['exposed'] or state['retired']:
+            raise ValueError('T1 tuning cannot occur after final T2/T3/exposure')
+        original = {variant['variant_id']: variant for variant in state['commitment']['variants']}
+        if any(variant != original.get(variant['variant_id']) for variant in catalog['variants']):
+            raise ValueError('public inputs differ from pre-tuning T0 split')
+
+    def assert_no_unknown_public_liability(self, *, events=None):
+        events = self.events() if events is None else events
+        for registration in events:
+            if registration['event_type'] != 't1_registered': continue
+            public = self._state(events, registration['edition'])['t1']
+            if any(call['status'] != 'known' for attempt in public['attempts'].values() for call in attempt['calls'].values()):
+                raise ValueError('unresolved public liability/single-flight reserve blocks additional live calls across editions')
 
     def finish(self, edition: str, attempt_id: str, status: str, result_capture: dict, *,
                request_id: str, expected_head: str | None) -> JournalReceipt:
@@ -199,17 +306,22 @@ class EligibilityContext:
     authority_receipt: dict
     verifier: ReceiptVerifier
 
+    def __post_init__(self):
+        if type(self.registry) is not EditionRegistry or type(self.verifier) is not ReceiptVerifier:
+            raise ValueError('concrete evaluator registry and Ed25519 verifier required, not mocked capability objects')
+
     def validate(self) -> dict:
         t0 = validate_commitment(self.commitment)
         t2 = validate_freeze(self.freeze, t0)
         suite = validate_suite(self.suite, t0, t2)
+        if suite['mode'] == 'live': self.registry.assert_no_unknown_public_liability()
         state = self.registry.state(t0['edition'])
         if state['commitment'] != t0 or state['freeze'] != t2 or state['exposed'] or state['retired']:
             raise ValueError('registry edition exposed/retired or pins differ')
         authority = closed(self.verifier.verify(self.authority_receipt, 'run_owner'),
                            {'schema_version', 'action', 'edition', 'suite_sha256', 'freeze_sha256',
                             'nonce', 'mode', 'capture_root_sha256', 'identity', 'host', 'collector_sha256',
-                            'spend_authority_sha256'},
+                            'spend_authority_sha256', 'registry_sha256'},
                            'suite authority')
         if authority['action'] != 'execute_suite':
             raise ValueError('explicit suite action required')
@@ -218,6 +330,8 @@ class EligibilityContext:
                 raise ValueError('authority/suite identity mismatch')
         if suite['capture_root_sha256'] != digest(str(self.registry.store.root)):
             raise ValueError('custody capture-root mismatch')
+        if authority['registry_sha256'] != digest(str(self.registry.path)):
+            raise ValueError('signed authority names a different edition registry')
         if suite['mode'] == 'live' and not is_sha(authority['spend_authority_sha256']):
             raise ValueError('live suite requires signed spend authority pin')
         # All signed receipts and distinct underlying observation captures must
@@ -283,3 +397,23 @@ class EligibilityContext:
         declared = next((variant for variant in self.commitment['variants'] if variant['variant_id'] == case.variant_id), None)
         if actual != declared or case.variant_id not in self.suite['variant_ids']:
             raise ValueError('actual source/sample/brief/oracle/layout differs from T0')
+
+    def claim_arm(self, variant_id: str, method: str) -> JournalReceipt:
+        payload = {'attempt_id': self.suite['attempt_id'], 'variant_id': variant_id, 'method': method}
+        receipt = self.registry._append(self.commitment['edition'], 'arm_started', payload,
+            request_id='arm-start:' + digest(payload), expected_head=self.registry.head)
+        if not receipt.newly_created:
+            raise ValueError('historical arm start cannot authorize re-execution')
+        return receipt
+
+    def finish_arm(self, variant_id: str, method: str, status: str, capture: dict) -> JournalReceipt:
+        self.registry.store.get(capture)
+        payload = {'attempt_id': self.suite['attempt_id'], 'variant_id': variant_id,
+                   'method': method, 'status': status, 'capture': capture}
+        return self.registry._append(self.commitment['edition'], 'arm_finished', payload,
+            request_id='arm-finish:' + digest({'attempt_id': self.suite['attempt_id'],
+                        'variant_id': variant_id, 'method': method}), expected_head=self.registry.head)
+
+    def finish_suite(self, status, capture, *, request_id):
+        return self.registry.finish(self.commitment['edition'], self.suite['attempt_id'], status, capture,
+                                    request_id=request_id, expected_head=self.registry.head)

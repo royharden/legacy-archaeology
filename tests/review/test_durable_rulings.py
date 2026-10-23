@@ -120,3 +120,83 @@ class DurableRulings(unittest.TestCase):
             else:
                 with self.assertRaises(ValueError): submit()
         self.assertEqual(len(self.store.events()), 12)
+
+    def test_committed_state_recovers_generation_identity_after_restart(self):
+        # what_bug_this_catches: JSON pointer caches becoming a second authority.
+        before = self.store.current_state()
+        self.assertEqual(before['status'], 'bound')
+        self.assertEqual(before['generation'], self.generation)
+        self.assertEqual(before['source_sha256'], self.batch['source_sha256'])
+        restarted = RulingStore(self.store.path)
+        self.assertEqual(restarted.current_state(), before)
+        same = restarted.bind_generation(self.generation, expected_state_token=before['state_token'])
+        self.assertEqual(same['state_token'], before['state_token'])
+
+    def test_generation_cas_rejects_stale_token_and_prevents_aba(self):
+        first = self.store.current_state()
+        changed = deepcopy(self.generation)
+        changed['brief_sha256'] = digest('changed brief')
+        changed['generation_sha256'] = digest({k: v for k, v in changed.items() if k != 'generation_sha256'})
+        second = self.store.bind_generation(changed, expected_state_token=first['state_token'])
+        third = self.store.bind_generation(self.generation, expected_state_token=second['state_token'])
+        self.assertEqual(third['generation_binding'], first['generation_binding'])
+        self.assertGreater(third['generation_epoch'], first['generation_epoch'])
+        self.assertNotEqual(third['state_token'], first['state_token'])
+        with self.assertRaises(ValueError):
+            self.store.bind_generation(changed, expected_state_token=first['state_token'])
+        self.assertEqual(self.store.current_state(), third)
+        self.assertEqual(self.store.events(), [])  # Generation metadata is not a fabricated answer.
+
+    def test_answer_commit_advances_state_and_historical_retry_token_stays_historical(self):
+        before = self.store.current_state()
+        receipt = self.answer()
+        after = self.store.current_state()
+        self.assertEqual(receipt['state_token'], after['state_token'])
+        self.assertEqual(after['head_event_id'], receipt['event_id'])
+        self.assertEqual(after['journal_sequence'], receipt['sequence'])
+        self.assertEqual(after['state_revision'], before['state_revision'] + 1)
+        self.answer(1, 'later-correction', 'unknown')
+        self.assertEqual(self.answer(), receipt)
+        self.assertNotEqual(receipt['state_token'], self.store.current_state()['state_token'])
+        with self.assertRaises(ValueError):
+            self.store.bind_generation(self.generation, expected_state_token=receipt['state_token'])
+
+    def test_failed_answer_does_not_advance_committed_state_token(self):
+        before = self.store.current_state()
+        with sqlite3.connect(self.store.path) as db:
+            db.execute("CREATE TRIGGER fail_atomic_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'fail'); END")
+        with self.assertRaises(sqlite3.IntegrityError): self.answer()
+        self.assertEqual(self.store.current_state(), before)
+
+    def test_legacy_active_binding_migrates_without_inventing_generation_payload(self):
+        old_path = self.root / 'legacy.sqlite'
+        with sqlite3.connect(old_path) as db:
+            db.execute('CREATE TABLE active(singleton INTEGER PRIMARY KEY,binding TEXT NOT NULL)')
+            db.execute('INSERT INTO active VALUES(1,?)', (digest(self.generation),))
+        migrated = RulingStore(old_path)
+        legacy = migrated.current_state()
+        self.assertEqual(legacy['status'], 'legacy_binding_requires_rebind')
+        self.assertIsNone(legacy['generation'])
+        recovered = migrated.bind_generation(self.generation, expected_state_token=legacy['state_token'])
+        self.assertEqual(recovered['status'], 'bound')
+        self.assertEqual(recovered['generation'], self.generation)
+        self.assertGreater(recovered['generation_epoch'], legacy['generation_epoch'])
+        self.assertEqual(migrated.events(), [])
+
+    def test_concurrent_generation_transition_has_one_state_cas_winner(self):
+        initial = self.store.current_state()
+        barrier = threading.Barrier(2)
+        def transition(number):
+            generation = deepcopy(self.generation)
+            generation['brief_sha256'] = digest('transition-' + str(number))
+            generation['generation_sha256'] = digest({k: v for k, v in generation.items() if k != 'generation_sha256'})
+            barrier.wait()
+            try:
+                self.store.bind_generation(generation, expected_state_token=initial['state_token'])
+                return 'committed'
+            except ValueError:
+                return 'conflict'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result = list(pool.map(transition, (1, 2)))
+        self.assertEqual(sorted(result), ['committed', 'conflict'])
+        self.assertEqual(self.store.current_state()['generation_epoch'], initial['generation_epoch'] + 1)

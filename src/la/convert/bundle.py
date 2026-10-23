@@ -28,11 +28,23 @@ TOTAL_LIMIT = 128 * MIB
 REF_KEYS = ('source_sha256', 'framing_sha256', 'ordinal', 'byte_start', 'length', 'raw_sha256')
 
 
+def bundle_limits():
+    """Public encoded-artifact budgets; raw input5MiB is not a JSON/hex byte limit."""
+    return {'schema_version': 1, 'raw_source_bytes': 5 * MIB, 'member_bytes': dict(MEMBER_LIMITS),
+            'total_bytes': TOTAL_LIMIT, 'max_members': len(MEMBER_LIMITS)}
+
+
 class BundleDifference(ValueError):
     def __init__(self, code, member=None, **details):
         self.difference = {'check': 'offline_bundle', 'code': code, **details}
         if member is not None: self.difference['member'] = member
         super().__init__(code)
+
+
+class BundleVerificationError(ValueError):
+    def __init__(self, verification):
+        self.verification = verification
+        super().__init__('bundle failed offline verification before target connection')
 
 
 @dataclass(frozen=True)
@@ -130,6 +142,9 @@ def _records_source(batch):
     if batch['status'] != 'accepted': raise BundleDifference('source_not_accepted', 'source.json')
     intake = batch.get('intake') or batch['samples'].get('intake')
     if not isinstance(intake, dict): raise BundleDifference('framing_descriptor_missing', 'source.json')
+    for key in ('observed_record_count', 'materialized_record_count', 'unmaterialized_record_count', 'input_byte_count'):
+        if type(intake.get(key)) is not int or intake[key] < 0:
+            raise BundleDifference('invalid_source_accounting_type', 'source.json', dependency=key)
     if intake.get('bounded_refusal') or intake.get('observed_record_count') != len(records) or intake.get('materialized_record_count') != len(records) or intake.get('unmaterialized_record_count') != 0:
         raise BundleDifference('source_accounting_mismatch', 'source.json')
     source = bytearray()
@@ -138,6 +153,8 @@ def _records_source(batch):
     for ordinal, (record, separator) in enumerate(zip(records, separators)):
         raw = bytes.fromhex(record['raw_hex'])
         ending = bytes.fromhex(separator['raw_hex'])
+        if any(type(separator.get(key)) is not int for key in ('ordinal', 'byte_start', 'length')):
+            raise BundleDifference('invalid_separator_reference_type', 'source.json', ordinal=ordinal)
         if record['ordinal'] != ordinal or record['byte_start'] != len(source) or len(raw) != record['length'] or _sha(raw) != record['raw_sha256']:
             raise BundleDifference('record_identity_mismatch', 'source.json', ordinal=ordinal)
         if record['source_sha256'] != batch['source_sha256'] or record['framing_sha256'] != batch['framing_sha256']:
@@ -178,7 +195,7 @@ def _journal(lineage, generation):
         ids.add(event['event_id']); requests.add(event['request_id'])
         chain_key = (event['generation_binding'], event['question_id'])
         prior = chains.get(chain_key)
-        if event['revision'] != (prior['revision'] + 1 if prior else 1) or event['expected_revision'] != event['revision'] - 1 or event['previous_event_id'] != (prior['event_id'] if prior else None) or event['old_option_id'] != (prior['option_id'] if prior else None) or not event['actor'].strip() or not event['reason'].strip():
+        if event['revision'] != (prior['revision'] + 1 if prior else 1) or event['expected_revision'] != event['revision'] - 1 or event['previous_event_id'] != (prior['event_id'] if prior else None) or event['old_option_id'] != (prior['option_id'] if prior else None) or not event['actor'].strip() or not event['reason'].strip() or not event['request_id'].strip():
             raise BundleDifference('historical_journal_chain_mismatch', 'rulings.json')
         chains[chain_key] = event
         if event['generation_binding'] != digest(generation): continue
@@ -203,10 +220,10 @@ def _outcome_file(data, filename):
     return outcomes
 
 
-def inspect_snapshot(bundle_path):
+def inspect_snapshot(bundle_path, *, captured=None):
     """Internal artifact snapshot for offline checks and the compatibility loader."""
     from . import approve_mapping, sql_artifacts, transform, validate_mapping
-    root, files = _snapshot(bundle_path)
+    root, files = _snapshot(bundle_path) if captured is None else captured
     raw_manifest = _json(files['manifest.json'], 'manifest.json')
     manifest = MigrationBundle.model_validate(raw_manifest).model_dump()
     _require_pins(manifest, 'manifest.json')
@@ -222,11 +239,16 @@ def inspect_snapshot(bundle_path):
     source = _records_source(batch)
     mapping = MappingSpec.model_validate(_json(files['mapping.json'], 'mapping.json')).model_dump()
     _require_pins(mapping, 'mapping.json')
+    if mapping['mapping_status'] != 'complete':
+        raise BundleDifference('mapping_incomplete', 'mapping.json')
     validate_mapping(batch, mapping, require_complete=True)
-    approval = Approval.model_validate(_json(files['approval.json'], 'approval.json')).model_dump()
+    raw_approval = _json(files['approval.json'], 'approval.json')
+    if raw_approval is None: raise BundleDifference('approval_missing', 'approval.json')
+    approval = Approval.model_validate(raw_approval).model_dump()
     if approval != approve_mapping(mapping, approval['actor'], approval['reason']):
         raise BundleDifference('approval_binding_mismatch', 'approval.json')
     lineage = _json(files['rulings.json'], 'rulings.json')
+    if lineage is None: raise BundleDifference('ruling_lineage_missing', 'rulings.json')
     generation = validate_generation(lineage['generation'])
     _require_pins(generation, 'rulings.json')
     projection = _journal(lineage, generation)
@@ -281,7 +303,7 @@ def inspect_snapshot(bundle_path):
                             code_matches, input_closure)
 
 
-def verify_bundle(bundle_path, *, expected_bundle_sha256=None, expected_source_sha256=None,
+def _verify_bundle(bundle_path, *, expected_bundle_sha256=None, expected_source_sha256=None,
                   expected_mapping_sha256=None):
     """Return a sealed offline audit; a self-consistent manifest is explicitly untrusted."""
     expected = {'bundle_sha256': expected_bundle_sha256, 'source_sha256': expected_source_sha256,
@@ -294,11 +316,18 @@ def verify_bundle(bundle_path, *, expected_bundle_sha256=None, expected_source_s
               'target_authority_required': True, 'target_validation': 'not_run', 'row_parity': 'not_run',
               'product_acceptance': 'pending', 'verifier_code_sha256': verifier_code_pin()}
     invalid = [key for key, value in expected.items() if value is not None and not _is_sha(value)]
+    snapshot = None
     if invalid:
         result['pin_status'] = 'invalid'
         result['differences'].append({'check': 'expected_pins', 'code': 'invalid_external_pin', 'keys': invalid})
     try:
-        snapshot = inspect_snapshot(bundle_path)
+        captured = _snapshot(bundle_path)
+        member_hashes = {name: _sha(data) for name, data in captured[1].items()}
+        result.update(member_sha256=member_hashes, snapshot_sha256=digest(member_hashes))
+        declared = _json(captured[1]['manifest.json'], 'manifest.json')
+        if isinstance(declared, dict):
+            result['declared_manifest_pins'] = {key: declared.get(key) if _is_sha(declared.get(key)) else None for key in expected}
+        snapshot = inspect_snapshot(bundle_path, captured=captured)
         manifest = snapshot.manifest
         result['observed_pins'] = {key: manifest[key] for key in expected}
         mismatch = [key for key, value in expected.items() if value is not None and value != manifest[key]]
@@ -321,17 +350,46 @@ def verify_bundle(bundle_path, *, expected_bundle_sha256=None, expected_source_s
             result['differences'].append({'check': 'expected_pins', 'code': 'external_bundle_pin_required'})
         result['loadable'] = result['integrity_status'] == 'verified' and result['pin_status'] == 'matched' and bool(snapshot.rows)
     except BundleDifference as exc:
+        if exc.difference['code'] in ('mapping_incomplete', 'approval_missing', 'ruling_lineage_missing', 'source_not_accepted'):
+            result['integrity_status'] = 'incomplete'
         result['differences'].append(exc.difference)
     except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
+        result['integrity_status'] = 'failed'
+        result['loadable'] = False
         result['differences'].append({'check': 'offline_bundle', 'code': 'invalid_artifact', 'error_type': type(exc).__name__})
     result['verification_sha256'] = digest(result)
-    return result
+    return result, snapshot
+
+
+def verify_bundle(bundle_path, *, expected_bundle_sha256=None, expected_source_sha256=None,
+                  expected_mapping_sha256=None):
+    """Offline sealed audit; no target/runtime authority or writes are performed."""
+    return _verify_bundle(bundle_path, expected_bundle_sha256=expected_bundle_sha256,
+                          expected_source_sha256=expected_source_sha256,
+                          expected_mapping_sha256=expected_mapping_sha256)[0]
+
+
+def load_snapshot(bundle_path, *, expected_bundle_sha256=None, expected_source_sha256=None,
+                  expected_mapping_sha256=None):
+    """Return exactly the snapshot audited against external pins, never a second read."""
+    verification, snapshot = _verify_bundle(bundle_path, expected_bundle_sha256=expected_bundle_sha256,
+                                           expected_source_sha256=expected_source_sha256,
+                                           expected_mapping_sha256=expected_mapping_sha256)
+    if not verification['loadable']:
+        raise BundleVerificationError(verification)
+    return snapshot, verification
 
 
 def write_verification_receipt(destination, receipt):
     """Exclusive atomic publication outside any frozen bundle; no bundle mutation."""
     if receipt.get('verification_sha256') != digest({k: v for k, v in receipt.items() if k != 'verification_sha256'}):
         raise ValueError('verification receipt identity mismatch')
+    if type(receipt.get('schema_version')) is not int or receipt['schema_version'] != 1 or receipt.get('operation') != 'offline_bundle_verification' or receipt.get('target_validation') != 'not_run' or receipt.get('row_parity') != 'not_run' or receipt.get('product_acceptance') != 'pending' or receipt.get('target_authority_required') is not True:
+        raise ValueError('offline verification receipt cannot claim runtime/product authority')
+    if type(receipt.get('loadable')) is not bool or receipt.get('integrity_status') not in ('verified', 'incomplete', 'failed') or receipt.get('pin_status') not in ('missing', 'partial', 'matched', 'mismatch', 'invalid', 'unverified'):
+        raise ValueError('invalid verification receipt states')
+    if receipt['loadable'] and (receipt['integrity_status'] != 'verified' or receipt['pin_status'] != 'matched' or not _is_sha(receipt.get('expected_pins', {}).get('bundle_sha256')) or receipt['expected_pins']['bundle_sha256'] != receipt.get('observed_pins', {}).get('bundle_sha256')):
+        raise ValueError('loadable receipt requires externally matched bundle pin')
     destination = Path(destination)
     if destination.is_symlink() or any((parent / 'manifest.json').is_file() for parent in destination.resolve().parents):
         raise ValueError('verification receipt must be outside frozen bundle')

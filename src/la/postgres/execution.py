@@ -8,6 +8,7 @@ from pathlib import Path
 import uuid
 
 from la.review import canonical, digest
+from la.convert.bundle import BundleVerificationError
 from .target import (TargetConfig, driver_and_connect, inspect_target, new_namespace,
                      observe, owned_namespace, parameters, seal_receipt, verify_structure,
                      connection_identity)
@@ -91,7 +92,11 @@ def database_check(bundle_path, *, dsn=None, authorized=False, target_config=Non
     receipt = _base('load_and_readback', target_config)
     unavailable = _unavailable(receipt, dsn, authorized, target_config)
     if unavailable: return unavailable
-    manifest, mapping, rows, ddl, sql, columns = _pinned_bundle(bundle_path, target_config)
+    try:
+        manifest, mapping, rows, ddl, sql, columns = _pinned_bundle(bundle_path, target_config)
+    except BundleVerificationError as exc:
+        return seal_receipt(dict(receipt, target_validation='failed', execution_status='refused_before_connection',
+                                 reason='offline_bundle_verification_failed', verification=exc.verification))
     if manifest['counts']['unresolved'] or not rows:
         return seal_receipt(dict(receipt, bundle_sha256=manifest['bundle_sha256'], reason='no_complete_load_rows'))
     namespace, run_id = new_namespace(), uuid.uuid4().hex
@@ -171,7 +176,11 @@ def reconcile_commit(bundle_path, namespace, *, dsn=None, authorized=False, targ
     unavailable = _unavailable(receipt, dsn, authorized, target_config)
     if unavailable: return unavailable
     owned_namespace(namespace)
-    manifest, mapping, rows, _, _, columns = _pinned_bundle(bundle_path, target_config)
+    try:
+        manifest, mapping, rows, _, _, columns = _pinned_bundle(bundle_path, target_config)
+    except BundleVerificationError as exc:
+        return seal_receipt(dict(receipt, target_validation='failed', execution_status='refused_before_connection',
+                                 reason='offline_bundle_verification_failed', verification=exc.verification))
     if not isinstance(execution_receipt, dict) or execution_receipt.get('receipt_sha256') != digest({k: v for k, v in execution_receipt.items() if k != 'receipt_sha256'}):
         raise ValueError('original immutable execution receipt required')
     identity = execution_receipt.get('identity')
@@ -217,7 +226,11 @@ def rollback_check(bundle_path, *, dsn=None, authorized=False, target_config=Non
         raise ValueError('unknown finite negative probe')
     unavailable = _unavailable(receipt, dsn, authorized, target_config)
     if unavailable: return unavailable
-    manifest, mapping, rows, ddl, sql, columns = _pinned_bundle(bundle_path, target_config)
+    try:
+        manifest, mapping, rows, ddl, sql, columns = _pinned_bundle(bundle_path, target_config)
+    except BundleVerificationError as exc:
+        return seal_receipt(dict(receipt, target_validation='failed', execution_status='refused_before_connection',
+                                 reason='offline_bundle_verification_failed', verification=exc.verification))
     receipt['bundle_sha256'] = manifest['bundle_sha256']
     if not rows:
         return seal_receipt(dict(receipt, reason='rollback_probe_requires_converted_record'))

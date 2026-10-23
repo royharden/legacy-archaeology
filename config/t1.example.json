@@ -1,0 +1,18 @@
+{
+  "port_context": {
+    "run": "REPLACE_WITH_UNIQUE_SIGNED_ATTEMPT_ID",
+    "ledger_path": "REPLACE_WITH_OWNED_LOCAL_LEDGER_PATH",
+    "use_ranker": true,
+    "provider_config": "REPLACE_WITH_EXACT_SIGNED_BILLING_CONFIG_OBJECT"
+  },
+  "eligibility_context": {
+    "phase": "T1",
+    "registry": "operator/editions.sqlite",
+    "catalog": "operator/public-catalog.json",
+    "authority_receipt": "operator/signed-t1-authority.json"
+  },
+  "pins": "REPLACE_WITH_EXACT_SIGNED_PROVISIONAL_PINS_OBJECT",
+  "freeze": null,
+  "attempt_request_id": "REPLACE_WITH_UNIQUE_REQUEST_ID",
+  "expected_registry_head": "REPLACE_WITH_CURRENT_REGISTRY_HEAD"
+}

@@ -11,6 +11,7 @@ dependencies = ["pydantic>=2.10,<3"]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
+evaluator = ["cryptography"]
 
 [project.scripts]
 la = "la.app:main"

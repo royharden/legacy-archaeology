@@ -109,7 +109,9 @@ No test imports a product parser/converter to construct canonical gold.
 
 After Dirty Mode closes and INT authorizes execution, the future outer-shell
 command is `python -m unittest discover -s legacy-archaeology/tests/evaluation -p "test_*.py"`.
-It needs only the standard library for these evaluator tests. This command has
+The original scorer/runner cases use the standard library. New custody signature
+cases additionally require the optional `cryptography` dependency after authorized
+setup. This command has
 **not** been executed, collected or imported here. AST parsing confirms source
 syntax only; assertions, generators, real target behavior and benchmark
 performance remain unverified.
@@ -120,3 +122,37 @@ policy. Canonical semantic values were retained unchanged while exact source,
 sample and framing-v2 RecordRef hashes were reauthored from the literal bytes.
 Initial public files are preserved in Git history and dated local backups; no
 measured result was rewritten and neither public edition is unseen holdout.
+
+Custody/edition application source is documented in [CUSTODY.md](CUSTODY.md).
+`eligibility.py`, `edition_registry.py` and `canary.py` implement closed T0/T2/T3
+identities, actual Ed25519 receipt verification, append-only unique attempts/arms,
+captured-effect checks, retirement and a future approved canary collector. Legacy
+custody booleans cannot authorize a heldout run. No registry, collector, crypto
+operation or custody test has executed during construction.
+
+`target_effects.TargetExpectation` and `grade_target` consume the actual closed
+D5 v2 target observation/negative-effect wire. Full W7 grading requires exact
+canonical readback with observed catalog types/nullability/precision, six actual
+SQLSTATE/rollback effects in separate fresh namespaces, a separate failed-load
+durable-absence capture and a genuine unknown-commit predecessor plus exact
+fresh durable-marker/readback reconciliation. Every observation is bound to
+externally configured candidate/authority/target/observer pins. Missing evidence
+is indeterminate; failed/mismatched effects fail. Legacy v1 helpers retain parity
+diagnostics but cannot set full target validation passed.
+
+`target_runner.TargetPorts` injects D5 prepare/grant/observe and optional actual
+failed-load/recovery collectors without passing oracle data. `run_variant` and
+`run_suite` accept optional `target_ports` and `target_freeze_sha256`; all five
+methods use the same path and immutable receipts. Default target state remains
+not_run; incomplete methods are not loaded. Protected custody is rechecked before
+target batches. Real controlled failure/recovery collectors and DB execution
+remain separately authorized later; no target port has run in construction.
+
+Public T1 live development/validation authority is documented in
+[T1-LIVE.md](T1-LIVE.md). `public_live` adds signed public catalogs/attempts,
+source-pinned D7 `BillingAdapter`, conservative request reservations, unchanged
+raw cached/reasoning usage, signed actual-bill reconciliation and optional
+T1-selection-to-T2 lineage in the same edition journal. It grants no hidden access.
+The actual D5 phase-v2 candidate and controlled v3 collectors are consumed through
+injected ports. Precision matches D5's declared max1000. All source/regression,
+crypto, provider, accounting, database and custody execution remains unverified.

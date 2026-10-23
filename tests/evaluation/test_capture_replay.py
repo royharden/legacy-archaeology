@@ -57,10 +57,11 @@ class CaptureReplay(unittest.TestCase):
                 replay_archive(store, hidden_ref, gold())
             with self.assertRaises(ValueError):
                 retire_archive(store, archive, release={'authorized': False})
-            retirement = retire_archive(store, archive, release={'authorized': True,
-                'edition': archive['edition'], 'authority_sha256': 'd' * 64})
-            replay = replay_archive(store, hidden_ref, gold(), retirement_ref=retirement)
-            self.assertFalse(replay['fresh_holdout'])
+            # An arbitrary release boolean/hash is no longer sufficient for an
+            # archive labeled heldout: actual signed journal retirement is needed.
+            with self.assertRaises(ValueError):
+                retire_archive(store, archive, release={'authorized': True,
+                    'edition': archive['edition'], 'authority_sha256': 'd' * 64})
 
 
 if __name__ == '__main__':

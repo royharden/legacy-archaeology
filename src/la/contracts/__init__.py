@@ -4,7 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator,field_validator
+from .base import Boundary
+from .protocol import policy_wire,filler_wire,options_wire,outcome_evidence_wire,closed,text,identity
+from .evidence import SampleMetadata,IntakeMetadata,DiscoveryMetadata,SpanEvidence
 
 REQUIRED_FIELDS = ('account_ref', 'description', 'balance', 'effective_date', 'status')
 
@@ -16,23 +19,6 @@ def digest(value: Any) -> str:
 
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-class Boundary(BaseModel):
-    model_config = ConfigDict(extra='forbid', strict=True)
-
-    @model_validator(mode='before')
-    @classmethod
-    def hash_shapes(cls, value):
-        if isinstance(value, dict):
-            if 'schema_version' in value and type(value['schema_version']) is not int:
-                raise ValueError('schema_version must be an exact integer')
-            ids = {'id', 'event_id', 'previous_event_id', 'question_id', 'generation_binding'}
-            for key, item in value.items():
-                if item is None or key not in cls.model_fields: continue
-                if key.endswith('_sha256') or key in ids:
-                    if type(item) is not str or len(item) != 64 or any(c not in '0123456789abcdef' for c in item):
-                        raise ValueError('invalid SHA256 identity: '+key)
-        return value
 
 class RecordRef(Boundary):
     source_sha256: str
@@ -62,25 +48,38 @@ class SourceBatch(Boundary):
     framing: str
     encoding: Literal['ASCII'] = 'ASCII'
     declared_format: dict[str, str]
-    width: int | None
+    width: int | None = Field(ge=1,le=256)
     status: Literal['accepted', 'refused']
     reasons: list[str]
-    records: list[RecordRef]
+    records: list[RecordRef] = Field(max_length=10000)
     brief_sha256: str
-    samples: dict[str, Any]
+    samples: SampleMetadata
     config_sha256: str
-    intake: dict[str, Any] = Field(default_factory=dict)
+    intake: IntakeMetadata = Field(default_factory=dict)
+
+    @field_validator('declared_format',mode='before')
+    @classmethod
+    def declared_wire(cls,value):
+        # Historical artifacts could emit just encoding; absent declarations are
+        # preserved, while new producers emit all three explicit declarations.
+        closed(value,{'encoding'},{'record_family','numeric'})
+        for item in value.values(): text(item,128)
+        return value
 
 class FieldCandidate(Boundary):
     id: str
-    start: int = Field(ge=0)
-    end: int = Field(gt=0)
+    start: int = Field(ge=0,le=255)
+    end: int = Field(gt=0,le=256)
     semantic_target: str
     data_type: Literal['text', 'decimal', 'date']
     policy: dict[str, Any]
-    evidence: list[dict[str, Any]]
+    evidence: list[SpanEvidence] = Field(max_length=64)
     origin: Literal['rules', 'mock']
     uncertainty: str
+
+    @field_validator('policy',mode='before')
+    @classmethod
+    def policy_shape(cls,value): return policy_wire(value)
 
     @model_validator(mode='after')
     def valid_interpretation(self):
@@ -112,13 +111,24 @@ class MappingSpec(Boundary):
     generation_sha256: str
     generation_binding: str
     policy_sha256: str
-    width: int | None
-    fields: list[FieldCandidate]
+    width: int | None = Field(ge=1,le=256)
+    fields: list[FieldCandidate] = Field(max_length=32)
     filler: list[dict[str, int]]
     supporting_event_ids: list[str]
     mapping_status: Literal['complete', 'incomplete']
     unresolved: list[str]
     mapping_sha256: str
+
+    @field_validator('filler',mode='before')
+    @classmethod
+    def filler_shape(cls,value): return filler_wire(value)
+
+    @field_validator('supporting_event_ids',mode='before')
+    @classmethod
+    def event_identity_list(cls,value):
+        if type(value) is not list or len(value)>32: raise ValueError('bounded supporting event identities required')
+        for event in value: identity(event)
+        return value
 
 class OutcomeRef(Boundary):
     source_sha256: str
@@ -137,15 +147,31 @@ class RowOutcome(Boundary):
     reasons: list[str]
     evidence: dict[str, Any]
 
+    @field_validator('evidence',mode='before')
+    @classmethod
+    def outcome_evidence(cls,value): return outcome_evidence_wire(value)
+
+    @field_validator('values',mode='before')
+    @classmethod
+    def typed_values(cls,value):
+        closed(value,(),REQUIRED_FIELDS)
+        for item in value.values():
+            if item is not None: text(item,4096)
+        return value
+
 class Question(Boundary):
     schema_version: Literal[1] = 1
     id: str
     semantic_target: str
     generation_binding: str
     source_sha256: str
-    prompt: str
+    prompt: str = Field(max_length=4000)
     options: list[dict[str, Any]]
-    evidence: list[dict[str, Any]]
+    evidence: list[SpanEvidence] = Field(max_length=6)
+
+    @field_validator('options',mode='before')
+    @classmethod
+    def offered_options(cls,value): return options_wire(value)
 
 class Approval(Boundary):
     schema_version: Literal[1] = 1
@@ -163,9 +189,9 @@ class AnswerEvent(Boundary):
     option_id: str
     actor: str
     reason: str
-    expected_revision: int
+    expected_revision: int = Field(ge=0)
     request_id: str
-    revision: int
+    revision: int = Field(ge=1)
     previous_event_id: str | None
     old_option_id: str | None
     semantic_target: str
@@ -175,6 +201,12 @@ class AnswerEvent(Boundary):
     policy_sha256: str
     timestamp: str
     event_id: str
+
+    @field_validator('option_id','old_option_id',mode='before')
+    @classmethod
+    def offered_identity(cls,value):
+        if value is not None and value!='unknown': identity(value)
+        return value
 
 class MigrationBundle(Boundary):
     schema_version: Literal[1] = 1
@@ -195,6 +227,14 @@ class MigrationBundle(Boundary):
     row_parity: Literal['not_run','exact','mismatch','incomplete']
     bundle_sha256: str
 
+    @field_validator('counts',mode='before')
+    @classmethod
+    def outcome_counts(cls,value):
+        from .protocol import integer
+        closed(value,{'converted','unresolved','quarantined'})
+        for count in value.values(): integer(count,0,10000)
+        return value
+
 class Generation(Boundary):
     schema_version: Literal[1] = 1
     source_sha256: str
@@ -202,11 +242,15 @@ class Generation(Boundary):
     brief_sha256: str
     policy_sha256: str
     generation_sha256: str
-    candidates: list[FieldCandidate]
+    candidates: list[FieldCandidate] = Field(max_length=480)
     unknowns: list[str]
     mode: Literal['rules', 'mock']
-    discovery: dict[str, Any] = Field(default_factory=dict)
+    discovery: DiscoveryMetadata = Field(default_factory=dict)
     filler: list[dict[str, int]] = Field(default_factory=list)
+
+    @field_validator('filler',mode='before')
+    @classmethod
+    def filler_shape(cls,value): return filler_wire(value)
 
     @model_validator(mode='after')
     def content_identity(self):

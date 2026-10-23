@@ -14,6 +14,36 @@ import os
 from la.review import REQUIRED, digest
 
 
+class StatementTrace:
+    """Hash the actual command/parameters immediately before each driver call."""
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.last_statement_sha256 = None
+
+    @staticmethod
+    def wire(value):
+        if isinstance(value, Decimal): return str(value)
+        if isinstance(value, date): return value.isoformat()
+        if isinstance(value, (list, tuple)): return [StatementTrace.wire(v) for v in value]
+        if isinstance(value, dict): return {key: StatementTrace.wire(v) for key, v in value.items()}
+        if value is None or type(value) in (str, int, bool): return value
+        raise ValueError('unsupported SQL parameter type for actual trace')
+
+    def execute(self, sql, parameters=None):
+        if not isinstance(sql, str): raise ValueError('code-owned SQL text required')
+        self.last_statement_sha256 = digest({'sql': sql, 'parameters': self.wire(parameters)})
+        return self.cursor.execute(sql, parameters)
+
+    def executemany(self, sql, parameters):
+        rows = list(parameters)
+        if len(rows) > 10000: raise ValueError('SQL parameter batch limit exceeded')
+        self.last_statement_sha256 = digest({'sql': sql, 'parameter_batches': self.wire(rows)})
+        return self.cursor.executemany(sql, rows)
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+
 @dataclass(frozen=True)
 class TargetConfig:
     authority_reference: str
@@ -28,6 +58,7 @@ class TargetConfig:
     expected_bundle_sha256: str | None = None
     expected_source_sha256: str | None = None
     expected_mapping_sha256: str | None = None
+    expected_candidate_sha256: str | None = None
 
     def validate(self):
         if self.scope != 'disposable_local_test' or not self.authority_reference.strip():
@@ -42,7 +73,7 @@ class TargetConfig:
             raise ValueError('driver and server version pins required')
         if type(self.statement_timeout_ms) is not int or not 1 <= self.statement_timeout_ms <= 120000:
             raise ValueError('invalid statement timeout')
-        for pin in (self.expected_bundle_sha256, self.expected_source_sha256, self.expected_mapping_sha256):
+        for pin in (self.expected_bundle_sha256, self.expected_source_sha256, self.expected_mapping_sha256, self.expected_candidate_sha256):
             if pin is not None and (not isinstance(pin, str) or re.fullmatch('[0-9a-f]{64}', pin) is None):
                 raise ValueError('invalid external target bundle/source/mapping pin')
         return self
@@ -95,7 +126,7 @@ def inspect_target(connection, config):
         cursor.execute("SELECT set_config('lock_timeout', '5000', true)")
     return {'database': database, 'role': role, 'host': host, 'port': port,
             'server_version_num': version, 'authority_reference': config.authority_reference,
-            'scope': config.scope}
+            'scope': config.scope, 'driver_version': config.driver_version}
 
 
 def connection_identity(connection):
@@ -164,10 +195,14 @@ def verify_structure(cursor, namespace, mapping):
     return {'columns': actual, 'check_constraints': checks, 'primary_key_present': True}
 
 
-def observe(cursor, namespace, rows, mapping, columns):
+def observation_query(namespace, columns):
     owned_namespace(namespace)
     quoted = ','.join('"' + name + '"' for name in columns)
-    cursor.execute(f'SELECT {quoted} FROM "{namespace}"."migrated_records" ORDER BY "ordinal"')
+    return f'SELECT {quoted} FROM "{namespace}"."migrated_records" ORDER BY "ordinal" LIMIT 10001'
+
+
+def observe(cursor, namespace, rows, mapping, columns):
+    cursor.execute(observation_query(namespace, columns))
     stored = cursor.fetchall()
     expected_refs = {(row['record_ref']['source_sha256'], row['record_ref']['ordinal']): row['record_ref'] for row in rows}
     seen, observations = set(), []

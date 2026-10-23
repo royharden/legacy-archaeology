@@ -1,0 +1,130 @@
+# Explanation and target-evidence consumers
+
+All commands and adapters below are constructed SOURCE. No app, test, signature,
+provider, stream, database or benchmark command has run in Dirty Mode. Actual
+authority/key trust, dependency versions, OS custody and target effects remain
+unverified. No current score or acceptance is implied.
+
+## Bounded interpretation explanations
+
+```console
+la explain RUN --offset 0 --limit 8 --examples 1
+la explain RUN CANDIDATE_ID --examples 3
+la explain RUN unknown --examples 0
+la report RUN --offset 0 --limit 50 --field-offset 0 --field-limit 8 --examples 1
+la report RUN --authorized-only
+```
+
+Explanation defaults to permitted spans; `--owner` explicitly selects local owner
+retained-source inspection. Row offset and physical-field offset are different.
+D4's actual explain_candidate/explain_layout resolve candidate/evidence identities,
+mask examples and retain proof slices. The report shows real byte ranges, offered
+typed policies, unresolved coverage and dependent-row impact. Digits do not prove
+scale/name/date/null rules. Unknown/not_offered is never converted into approval;
+layout representatives and rankings are presentation choices. No candidate recall
+or inference-quality measurement exists. See
+[explanation wire](../src/la/inference/EXPLANATIONS.md).
+
+## Concrete public-key target authority
+
+The v2 path uses actual TargetAuthorityVerifier(trusted_issuers,public_keys), lazy
+Ed25519 verification and the closed signed target intent described in
+[target observation v2](../src/la/postgres/OBSERVATIONS.md). No verification
+callback, signer, private key, automatic trust flag or authority minting exists.
+The operator explicitly selects a separate public profile root/file. Candidate
+or authority JSON cannot select the trust profile. Its exact source shape is:
+
+```json
+{"schema_version":1,"trusted_issuers":{},"public_keys":{}}
+```
+
+Empty mappings intentionally refuse activation. Later operator configuration
+maps key_id to `{issuer,role:"target_authority"}` and the same key_id to a32-byte
+public key encoded as64 lowercase hex characters. Distinct keys are required.
+Private-key and extra fields refuse. No actual keys, accounts or trust profile
+were created/read here. Optional `evaluator` dependency extra declares cryptography
+only; it is uninstalled/unpinned and needs actual activation/version/license checks.
+
+```console
+la --root .la-runs database-observe RUN/bundles/CONTENT_HASH --authority signed-target.json --target-config target-config.json --public-trust-root OPERATOR_ROOT --public-trust-profile target-public.json --negative rollback --negative nonnull --negative check --negative numeric_overflow --negative duplicate_identity --negative invalid_date
+la --root .la-runs database-recover RUN/bundles/CONTENT_HASH --authority signed-target.json --target-config target-config.json --public-trust-root OPERATOR_ROOT --public-trust-profile target-public.json --observation-receipt RUN/target-observation/PRIOR.json
+```
+
+The signed intent pins the exact candidate/source/method/edition/freeze/observer
+and allowed load/negative_probes/reconcile operations. Product bundle pins stay
+external in TargetConfig; its authority_reference is the signed intent's content
+pin. Environment access happens only after signature and candidate/config checks.
+Only the named LA_TEST_DATABASE_DSN variable is read, without logging its value;
+explicit claimed loopback port/target role/driver/server rules still apply. Missing
+trust/config/authority/DSN stays not_run; signature failure never falls back to the
+legacy target path. Recovery rejects new negative probes and never repeats a load.
+
+Legacy database-check/reconcile/rollback/constraints remain compatible inspection
+interfaces. Their producer receipts cannot supply full v2 target acceptance.
+Neither normal committed readback errors nor parser success is lost-ACK evidence.
+Normal commit, genuinely unknown acknowledgement and reconciliation retain distinct
+producer states. No adapter turns those states into a producer passed flag.
+
+## Evaluator candidate and common target ports
+
+`python scripts/eval.py --evidence-root ROOT --out captures prepare-target
+--evidence public-candidate.json` accepts a closed packet: schema_version, split=
+development, visible, mapping, method, edition, freeze_sha256. Mapping is the actual
+default product-port result with evaluator_proposal; visible contains approved
+bytes/samples/brief, never oracle. It calls D5 prepare_evaluation_candidate and
+writes an immutable evaluation-candidate receipt. It does not sign authority,
+make product rulings/approval or execute a target. Product load APIs reject this
+candidate kind. Current freeze terminology is T2; separate T1 phase APIs are a
+named producer reconciliation and must not be simulated by relabeling a T1 plan.
+
+For a separately authorized future suite add `--target-factory
+scripts.target_ports:factory`. The run config's separate target_context has exact
+keys root, public_trust_root, public_trust_profile, grants, dsn_env. It never goes
+to an inference/provider callback. The grants file is a bounded map keyed by exact
+candidate SHA256; every entry names signed_authority, target_config, expectation
+files and optional failed_load/prior/reconciled actual observation files under its
+explicit operator root. No entry means no target action. Preparation uses the same
+deterministic validation/converter/compiler for all five methods, with explicit
+non-loadable policy rebinding to each batch. No gold reaches the producer.
+
+Expectation files contain D6 TargetExpectation fields: candidate,
+authority_sha256, target_config_sha256, observer_code_sha256, target, columns and
+optional required_negatives (all6 required). Columns are the exact8 provenance+
+semantic catalog columns, each `[name,type,nullable,precision,scale]`; they are
+externally configured rather than copied from observed rows to repair a mismatch.
+The factory verifies the signed intent and all external pins before DSN access.
+D6 receives actual TargetGrant/TargetPorts objects and preserves every failed arm
+and batch denominator. Saved common CLI wrappers are unwrapped/hash-checked before
+grading. No actual grants or captured effects were manufactured.
+
+Default factory source accepts existing separately captured failed-load and genuine
+unknown-commit/reconciliation observations. Without them grading is indeterminate.
+D5's controlled failure collectors and T1/T2 phase additions are assigned source
+work; consumers must use their final API, never synthesize network failures,
+empty successful observations or product history.
+
+## Independent grading and truthful display
+
+`python scripts/eval.py --evidence-root ROOT --out captures target-effects
+--evidence public-effects.json` consumes public development oracle_records,
+expectation, observation and optional prior/failed_load/recovery_observation,
+plus edition/split metadata. It calls D6 grade_target. Exact rows alone are
+insufficient: all six actual negative effects, separate failed-load durable absence
+and genuine prior/recovery lineage are required. Missing evidence remains
+not_run/failed/indeterminate. Hashes are identities; trusted collector/custody
+provenance still requires actual later verification. Result receipts preserve full
+denominators and product_acceptance=pending.
+
+`la report RUN --evaluation-receipt relative/receipt.json` displays an explicitly
+supplied, hash/source/mapping-bound evaluator result with attributed provenance.
+A non-loadable proposal's grade cannot attach to a different product MappingSpec.
+Permitted-only reports exclude unrestricted execution/observation/evaluation text.
+
+The public mock demo optionally accepts --target-evidence plus explicit public
+trust root/profile. It grades already captured v2 evidence against the fixture's
+independent public oracle and exact current bundle. It never connects, invents an
+observation or accepts an oracle supplied in that packet. Default demo remains
+offline with target_validation=not_run and benchmark_status=not_run. Actual public
+fixture is development-v2, never hidden/unseen. All examples remain unexecuted.
+
+V7F consumer update: actual D6 BillingAdapter(config, priced_usage) is wired through the default eligibility factory, including signed billing_config_sha256/billing_code_sha256 and exact T1 gateway extras. The provider preserves evaluation_phase/evaluation_authority_sha256 in actual call receipts. D6 independently verifies raw usage/receipt/config/model/pins against the same pure pricing helper; unsupported categories remain unknown. TargetGrant now carries the original signed envelope plus concrete ReceiptVerifier, never a preverified payload callback. Actual D5 prepare_evaluation_candidate_v2 and controlled_failed_load/controlled_commit_ack collectors are wired through TargetPorts.prepare_v2 and separately authorized selections. This supersedes the earlier source-pending collector/phase note above. See [caller examples](../config/README.md) and [publication authority](RESULTS.md). No effects or signature operations were performed.

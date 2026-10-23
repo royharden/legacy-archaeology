@@ -2,10 +2,11 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from la.app import parser, execute
-from la.app.artifacts import immutable, pointer, read, within
+from la.app.artifacts import immutable, pointer, read, within,receipt
 from la.contracts import digest, sha256
 from la.ingest.evidence import make_evidence
 from la.review import RulingStore
@@ -130,6 +131,53 @@ class CliJourneyTests(unittest.TestCase):
         self.assertIsNone(result['manifest']['approval_sha256'])
         self.assertEqual((Path(result['bundle'])/'rows.jsonl').read_bytes(),b'')
         self.assertEqual(result['manifest']['counts']['unresolved'],2)
+
+    def test_generation_cache_missing_corrupt_or_stale_recovers_only_from_sqlite(self):
+        """what_bug_this_catches: a JSON cache becomes authority or crash loses committed generation."""
+        store=RulingStore(self.run/'rulings.sqlite')
+        before=store.current_state()
+        index=self.run/'current-generation.json'
+        index.write_bytes(b'interrupted cache bytes')
+        recovered=self.call('questions',self.run_id)
+        self.assertEqual(len(recovered['questions']),5)
+        self.assertEqual(read(index)['generation_sha256'],before['generation_sha256'])
+        self.assertEqual(store.current_state()['state_token'],before['state_token'])
+        archive=self.run/('generation-'+before['generation_sha256']+'.json')
+        archive.unlink()  # Own temporary fixture, simulating a crash before cache publication.
+        index.unlink()
+        self.call('questions',self.run_id)
+        self.assertEqual(read(archive),before['generation'])
+        self.assertEqual(self.call('history',self.run_id)['events'],[])
+
+    def test_explanation_preserves_unknown_and_unapproved_byte_evidence(self):
+        """what_bug_this_catches: explanatory ranking/pattern becomes an approved business policy."""
+        unknown=self.call('explain',self.run_id,'unknown','--examples','0')
+        self.assertEqual(unknown['state'],'abstained')
+        self.assertEqual(unknown['approval_status'],'unapproved')
+        balance=self.call('explain',self.run_id,self.ids['balance'])
+        self.assertEqual(balance['candidate']['start'],18)
+        self.assertEqual(balance['candidate']['end'],27)
+        self.assertEqual(balance['correct_policy_available'],'not_established')
+        self.assertTrue(balance['diagnostic_only'])
+        self.assertTrue(all(example['typed_value']=='not_inferred' for example in balance['examples']))
+        self.assertEqual(self.call('history',self.run_id)['events'],[])
+
+    def test_new_target_path_missing_signed_trust_never_reads_environment(self):
+        """what_bug_this_catches: a new target command loads/reads DSN before real authority."""
+        folder=self.root/'no-authority-candidate'; folder.mkdir()
+        with patch('la.app.observations.os.environ.get',side_effect=AssertionError('no environment read allowed')):
+            result=self.call('database-observe',str(folder.relative_to(self.root)))
+        self.assertEqual(result['payload']['target_validation'],'not_run')
+        self.assertIsNone(result['payload']['observation'])
+
+    def test_permitted_only_report_omits_unrestricted_legacy_execution_text(self):
+        """what_bug_this_catches: a legacy receipt leaks free text around newer permission masks."""
+        mapping=self.call('status',self.run_id)['mapping']
+        saved=receipt(self.run,'execution',dict(mapping_sha256=mapping['mapping_sha256'],
+            observation={'unrestricted_text':'SECRET_NOT_PERMITTED_SAMPLE'}))
+        pointer(self.run/'current-execution.json',{'relative_path':str(Path(saved['path']).relative_to(self.run))})
+        rendered=self.call('report',self.run_id,'--authorized-only')
+        self.assertNotIn('SECRET_NOT_PERMITTED_SAMPLE',Path(rendered['report']).read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__': unittest.main()

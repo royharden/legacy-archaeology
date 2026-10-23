@@ -1,5 +1,6 @@
 """Finite byte/policy/name proposals with evidence-bound, honest coverage metadata."""
 from la.contracts import REQUIRED_FIELDS, digest, sha256, validate_batch, validate_generation
+from la.contracts.evidence import validate_discovery_metadata
 from la.ingest.evidence import make_evidence
 from .alternatives import compatible_targets, disclosed_names, policy_alternatives, status_vocabulary
 from .discovery import discover_fields
@@ -101,6 +102,7 @@ def hypothesize(batch: dict, brief: str, mode: str = 'rules') -> dict:
         dependencies={'source_sha256': batch['source_sha256'], 'framing_sha256': batch['framing_sha256'],
                       'brief_sha256': batch['brief_sha256'], 'config_sha256': batch['config_sha256']})
     discovery['discovery_sha256'] = digest({key: value for key, value in discovery.items() if key != 'discovery_sha256'})
+    discovery = validate_discovery_metadata(discovery)
     value = dict(schema_version=1, source_sha256=batch['source_sha256'], framing_sha256=batch['framing_sha256'],
         brief_sha256=batch['brief_sha256'], policy_sha256=digest({'policy': POLICY,
             'sample_artifact': batch['samples']['artifact_sha256'], 'sample_selection': batch['samples'].get('selection_sha256'),
@@ -114,4 +116,4 @@ def candidate_diagnostics(generation: dict) -> dict:
     value = validate_generation(generation)
     if digest({key: item for key, item in value.items() if key != 'generation_sha256'}) != value['generation_sha256']:
         raise ValueError('generation identity mismatch')
-    return value['discovery']
+    return validate_discovery_metadata(value['discovery'])

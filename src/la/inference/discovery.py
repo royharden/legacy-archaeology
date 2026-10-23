@@ -1,6 +1,7 @@
 """Bounded byte-only boundary proposals; scores are support, not correctness."""
 from collections import Counter
 from la.contracts import digest
+from la.contracts.evidence import validate_discovery_metadata
 from la.ingest.evidence import verify_records
 
 MAX_FIELDS = 32
@@ -37,7 +38,7 @@ def discover_fields(batch: dict) -> dict:
             'coverage_status': 'unproven', 'abstention_reasons': [], 'omitted_span_count': 0}
     if batch['status'] != 'accepted' or width is None or not records:
         base['abstention_reasons'] = ['input_not_eligible']
-        return dict(base, discovery_sha256=digest(base))
+        return validate_discovery_metadata(dict(base, discovery_sha256=digest(base)))
     rows = [bytes.fromhex(record['raw_hex']) for record in records]
     profiles = []
     for position in range(width):
@@ -115,4 +116,4 @@ def discover_fields(batch: dict) -> dict:
                                     'all_policies_require_confirmation'])
     if len(spans) > MAX_FIELDS: base['abstention_reasons'].append('field_budget_exhausted')
     if len(date_spans) > 16: base['abstention_reasons'].append('date_shape_budget_exhausted')
-    return dict(base, discovery_sha256=digest(base))
+    return validate_discovery_metadata(dict(base, discovery_sha256=digest(base)))

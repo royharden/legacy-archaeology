@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 
-def factory(context):
+def factory(context,*,provider_authority=None):
     from evaluation.runner import RunnerPorts
     from la.contracts import REQUIRED_FIELDS, digest
     from la.ingest import ingest_bytes
@@ -21,7 +21,7 @@ def factory(context):
         raise ValueError('explicit ranker selection required')
     provider = provider_port(config=context.get('provider_config'),
         ledger_path=Path(context.get('ledger_path', '.la-runs/evaluator-provider.sqlite')),
-        run=context.get('run', 'public-development'))
+        run=context.get('run', 'public-development'),trusted_authority=provider_authority)
 
     def batch(visible):
         value = ingest_bytes(bytes.fromhex(visible['source_hex']), visible['brief'], visible['permitted_samples'])

@@ -2,6 +2,7 @@
 from collections import defaultdict
 from la.contracts import MappingSpec, digest, validate_batch, validate_generation
 from .evidence import REF_KEYS, resolve_evidence, verify_records
+from .observed import MAX_OBSERVED_INTEGER
 
 MAX_PAGE = 100
 MAX_DISPLAY_BYTES = 256
@@ -44,7 +45,11 @@ def _prepare(batch, authorized_only, generation, mapping):
     verify_records(batch)
     observed = intake.get('observed_record_count', materialized)
     missing = intake.get('unmaterialized_record_count', 0)
-    if (type(observed) is not int or type(missing) is not int or observed < 0 or missing < 0
+    count_unknown = observed is None and missing is None
+    if count_unknown:
+        if materialized or batch['status'] != 'refused' or intake.get('record_count_status') != 'unknown' or not intake.get('stream_observation'):
+            raise ValueError('unknown count requires validated unmaterialized stream refusal')
+    elif (type(observed) is not int or type(missing) is not int or observed < 0 or missing < 0
             or observed != materialized + missing
             or type(intake.get('materialized_record_count', materialized)) is not int
             or intake.get('materialized_record_count', materialized) != materialized):
@@ -57,7 +62,8 @@ def _prepare(batch, authorized_only, generation, mapping):
     counts = {'observed': observed, 'materialized': materialized, 'unmaterialized': missing,
               'eligible': sum(record['disposition'] == 'eligible' for record in batch['records']),
               'quarantined': sum(record['disposition'] == 'quarantined' for record in batch['records']),
-              'count_provenance': 'retained_intake' if intake else 'legacy_materialized_records'}
+              'record_count_status': 'unknown' if count_unknown else 'known',
+              'count_provenance': 'completed_stream_observation' if intake.get('stream_observation') else 'retained_intake' if intake else 'legacy_materialized_records'}
     proof_cache = set()
     def resolve(proof, authorized):
         key = (digest(proof), authorized)
@@ -70,7 +76,8 @@ def _prepare(batch, authorized_only, generation, mapping):
         samples = batch['samples']
         selected = samples.get('authorized_spans', [])
         if (not isinstance(selected, list) or len(selected) > MAX_AUTH_SPANS
-                or digest(selected) != samples.get('selection_sha256') or not samples.get('authorization')):
+                or digest(selected) != samples.get('selection_sha256')
+                or not samples.get('authorization') and not (materialized == 0 and intake.get('stream_observation'))):
             raise ValueError('bounded hash-bound permitted selection required')
         total_bytes, ordinals = 0, set()
         for item in selected:
@@ -95,7 +102,7 @@ def _prepare(batch, authorized_only, generation, mapping):
                   'policy_sha256': None, 'generation_sha256': None, 'mapping_sha256': None,
                   'mapping_status': 'not_supplied',
                   'mapping_unresolved_reasons': [], 'generation_unknown_reasons': [],
-                  'source_integrity_scope': 'reconstructed_source' if intake and not missing and not intake['bounded_refusal'] else 'record_hashes_and_retained_metadata'}
+                  'source_integrity_scope': 'completed_stream_observation_not_reconstructed' if intake.get('stream_observation') else 'reconstructed_source' if intake and not missing and not intake['bounded_refusal'] else 'record_hashes_and_retained_metadata'}
     def field_overlay(field, kind):
         if digest({key: value for key, value in field.items() if key != 'id'}) != field['id']:
             raise ValueError('overlay candidate identity mismatch')
@@ -207,6 +214,12 @@ def inspection_page(batch: dict, *, offset=0, limit=50, authorized_only=False, g
     """Page by original source ordinal; authorization never renumbers records."""
     _integer(limit, 'limit', 1, MAX_PAGE)
     batch, counts, allowed, overlays, provenance, intake = _prepare(batch, authorized_only, generation, mapping)
+    if counts['observed'] is None:
+        _integer(offset, 'offset with unknown record count', 0, 0)
+        value = _envelope(batch, counts, provenance, authorized_only)
+        value.update(state='unknown_count', offset=0, limit=limit, scanned_stop=None, next_offset=None,
+                     rows=[], returned_record_count=0, not_authorized_count=0, unmaterialized_in_page=None)
+        return dict(value, inspection_sha256=digest(value))
     _integer(offset, 'offset', 0, counts['observed'])
     stop = min(offset + limit, counts['observed'])
     rows, hidden = [], 0
@@ -232,11 +245,14 @@ def inspection_detail(batch: dict, ordinal: int, *, start=0, end=None, authorize
                       generation=None, mapping=None) -> dict:
     """Inspect a bounded record span. Unauthorized cells are masked, not expanded."""
     batch, counts, allowed, overlays, provenance, intake = _prepare(batch, authorized_only, generation, mapping)
-    _integer(ordinal, 'ordinal', 0, counts['observed'] - 1)
+    _integer(ordinal, 'ordinal', 0, MAX_OBSERVED_INTEGER if counts['observed'] is None else counts['observed'] - 1)
     _integer(start, 'start', 0, 5 * 1024 * 1024)
     if end is not None: _integer(end, 'end', start, start + MAX_DISPLAY_BYTES)
     value = _envelope(batch, counts, provenance, authorized_only)
-    if ordinal >= counts['materialized']:
+    if counts['observed'] is None:
+        value.update(state='unknown_count', ordinal=None, requested_ordinal=ordinal, row=None,
+                     requested_span={'start': start, 'end': end}, reason='record_identity_not_observed')
+    elif ordinal >= counts['materialized']:
         value.update(state='unmaterialized', ordinal=ordinal, row=None,
                      requested_span={'start': start, 'end': end}, reason='record_bytes_not_materialized')
     else:

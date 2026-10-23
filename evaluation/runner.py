@@ -15,7 +15,7 @@ from statistics import median
 import hashlib
 
 from .artifacts import CaptureStore, canonical, digest, is_sha
-from .benchmark import ARMS, FREEZE_KEYS, SimulatedSME, hidden_run_eligibility
+from .benchmark import ARMS, SimulatedSME
 from .scorer import aggregate_variant_reports, score, score_product, slot_diagnostics
 
 
@@ -120,9 +120,15 @@ def _authorize(mode: str, case: VariantCase, authority: dict | None,
         raise ValueError('use replay_archive for offline replay')
     if case.split not in ('development', 'validation', 'heldout'):
         raise ValueError('unknown split')
+    if mode == 'live' and case.split != 'heldout':
+        from .public_live import PublicLiveContext
+        if type(eligibility) is not PublicLiveContext or store is None or freeze is not None:
+            raise ValueError('pre-T2 public live requires exact T1 context, not a hidden freeze/custody flag')
+        eligibility.authorize_case(case, pins, store, mode)
+        return
     if mode == 'live' or case.split == 'heldout':
         from .edition_registry import EligibilityContext
-        if not isinstance(eligibility, EligibilityContext) or store is None:
+        if type(eligibility) is not EligibilityContext or store is None:
             raise ValueError('verified observation receipts and exact edition registry required; custody booleans rejected')
         if freeze != eligibility.freeze:
             raise ValueError('runtime freeze differs from registered T2')
@@ -137,11 +143,12 @@ class RequestGateway:
     """
 
     def __init__(self, method: str, mode: str, visible: dict, ports: RunnerPorts,
-                 store: CaptureStore, authority: dict | None):
+                 store: CaptureStore, authority: dict | None, meter=None):
         self.method, self.mode, self.visible = method, mode, visible
         self.ports, self.store, self.authority = ports, store, authority or {}
         self.attempts: list[dict] = []
         self.busy = False
+        self.meter = meter
 
     def request(self, purpose: str, candidates: list[dict] | None = None) -> object:
         if self.busy or len(self.attempts) >= ARMS[self.method]['max_requests']:
@@ -169,6 +176,8 @@ class RequestGateway:
                    'prompt': prompt, 'prompt_sha256': digest(prompt),
                    'max_input_tokens': 8000, 'max_output_tokens': 2000,
                    'allow_retries': False, 'allow_repairs': False if self.method == 'B1' else True}
+        call_id = self.meter.reserve(request, tokens) if self.meter is not None else None
+        settled = False
         item = {'attempt': request['attempt'], 'prompt_sha256': request['prompt_sha256'],
                 'input_tokens_preflight': tokens, 'status': 'attempted',
                 'cost_status': 'unknown', 'known_cost': None, 'usage': None}
@@ -198,10 +207,18 @@ class RequestGateway:
                 if not amount.is_finite() or amount < 0:
                     raise ValueError('invalid cost')
                 item.update(cost_status='known', known_cost=str(amount))
+            if self.meter is not None:
+                usage_receipt = self.meter.settle(call_id, reply=reply)
+                settled = True
+                item.update(usage_receipt)
+                if usage_receipt['cost_status'] != 'known':
+                    raise ValueError('T1 model/price/usage mismatch or unknown liability; future calls refused')
             item.update(status='returned', provider=reply.get('provider'), model=reply.get('model'),
                         price_sha256=reply.get('price_sha256'))
             return deepcopy(reply['output'])
         except Exception as exc:
+            if self.meter is not None and not settled:
+                self.meter.settle(call_id, error_type=type(exc).__name__)
             item.update(status='failed', error_type=type(exc).__name__)
             # Exception messages may contain DSNs/keys from external adapters.
             raise
@@ -237,7 +254,7 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                 mode: str = 'mock', pins: dict | None = None,
                 authority: dict | None = None, freeze: dict | None = None,
                 custody: dict | None = None, _suite_ref: dict | None = None,
-                eligibility=None) -> dict:
+                eligibility=None, target_ports=None, target_freeze_sha256: str | None = None) -> dict:
     """All five arms; failures stay in every denominator and raw attempts survive.
 
     One mapping/question session per layout, followed by all ten batches. Caller
@@ -269,7 +286,12 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
     for method in ARMS:
         # Recheck registry revocation/exposure and exact pins before every arm.
         _authorize(mode, case, authority, freeze, custody, pins, eligibility=eligibility, store=store)
-        gateway = RequestGateway(method, mode, deepcopy(visible), ports, store, authority)
+        if mode == 'live' or case.split == 'heldout':
+            eligibility.claim_arm(case.variant_id, method)
+        from .public_live import PublicLiveContext
+        public_live = type(eligibility) is PublicLiveContext and mode == 'live'
+        gateway = RequestGateway(method, mode, deepcopy(visible), ports, store, authority,
+                                 meter=eligibility.meter(case, method) if public_live else None)
         started = perf_counter()
         raw, outputs, answers, questions = [], [], [], []
         mapping, status, error_type = None, 'completed', None
@@ -284,6 +306,8 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                 raw.append(store.put('generation', generation))
                 if method != 'C0':
                     questions = _questions(ports.questions(deepcopy(generation)))
+                    if public_live and len(questions) > eligibility.validate()['caps']['max_questions']:
+                        raise ValueError('signed T1 question cap exceeded')
                 if method == 'R1':
                     broker = SimulatedSME(deepcopy(case.accepted_choices))
                     answers = [broker.answer(question) for question in questions]
@@ -328,6 +352,25 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                                                 generation.get('candidates', []))
             except (KeyError, ValueError, TypeError):
                 diagnostics = {'status': 'malformed_layout', 'diagnostic_only': True}
+        target_report = {'target_validation': 'not_run', 'batches': []}
+        if target_ports is not None and mapping and status in ('completed', 'partial'):
+            from .target_runner import run_target_arm
+            selected_target_pin = target_freeze_sha256 or (freeze or {}).get('freeze_sha256')
+            if public_live:
+                plan_pin = eligibility.validate()['authority_sha256']
+                target_report = run_target_arm(case, mapping, method, store, target_ports,
+                    freeze_sha256=None, mode=mode,
+                    phase_scope={'evaluation_phase': 'T1', 'split': case.split,
+                                 'evaluation_plan_sha256': plan_pin, 'freeze_sha256': None},
+                    preflight=lambda: _authorize(mode, case, authority, freeze, custody, pins,
+                                                 eligibility=eligibility, store=store))
+            elif eligibility is not None and selected_target_pin != eligibility.freeze['freeze_sha256']:
+                raise ValueError('target scope differs from frozen protected suite')
+            else:
+                target_report = run_target_arm(case, mapping, method, store, target_ports,
+                    freeze_sha256=selected_target_pin, mode=mode,
+                    preflight=lambda: _authorize(mode, case, authority, freeze, custody, pins,
+                                                 eligibility=eligibility, store=store))
         raw.append(store.put('arm_raw', {'method': method, 'input_sha256': input_sha,
                    'mapping': mapping, 'outcomes': outputs, 'questions': questions,
                    'answers': answers, 'attempts': gateway.attempts,
@@ -337,6 +380,8 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                      if item['known_cost'] is not None), Decimal(0))
         result = {'schema_version': 1, 'method': method, 'variant_id': case.variant_id,
                   'edition': case.edition, 'split': case.split, 'mode': mode,
+                  'evaluation_phase': 'T1' if public_live else 'T3' if case.split == 'heldout' else 'public',
+                  'visibility': eligibility.catalog['visibility'] if public_live else 'sealed' if case.split == 'heldout' else 'public',
                   'status': status, 'error_type': error_type, 'input_sha256': input_sha,
                   'layout_diagnostics': diagnostics,
                   'score': report, 'captures': raw, 'request_attempts': len(gateway.attempts),
@@ -347,8 +392,12 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                   'answer_source': 'agent_provisional' if method == 'R1' else None,
                   'known_cost_subtotal': str(known), 'known_total_cost': None if unknown else str(known),
                   'unknown_liabilities': unknown, 'latency_seconds': perf_counter() - started,
-                  'target_validation': 'not_run', 'product_acceptance': 'pending'}
+                  'target_validation': target_report['target_validation'], 'target_report': target_report,
+                  'product_acceptance': 'pending'}
         result['receipt_capture'] = store.put('arm_receipt', result)
+        if mode == 'live' or case.split == 'heldout':
+            eligibility.finish_arm(case.variant_id, method, status, result['receipt_capture'])
+            eligibility.authorize_case(case, pins, store, mode)
         results.append(result)
     manifest = {'schema_version': 1, 'edition': case.edition, 'variant_id': case.variant_id,
                 'split': case.split, 'mode': mode, 'input_sha256': input_sha,
@@ -362,13 +411,18 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
               split: str, mode: str = 'mock', pins: dict | None = None,
               authority: dict | None = None, freeze: dict | None = None,
               custody: dict | None = None, eligibility=None,
-              attempt_request_id: str | None = None, expected_registry_head: str | None = None) -> dict:
+              attempt_request_id: str | None = None, expected_registry_head: str | None = None,
+              target_ports=None, target_freeze_sha256: str | None = None) -> dict:
     """Predeclare the complete supported split before any arm sees an input.
 
     Failed arms remain in manifests. A failed/cancelled hidden suite cannot reuse
     its edition: the append-only registered attempt is retained even on crash.
     """
     expected = {'development': 6, 'validation': 4, 'heldout': 8}.get(split)
+    from .public_live import PublicLiveContext
+    public_live = mode == 'live' and type(eligibility) is PublicLiveContext
+    if public_live and split in ('development', 'validation'):
+        expected = len(eligibility.catalog['variants'])
     if expected is None or len(cases) != expected or len({case.variant_id for case in cases}) != expected:
         raise ValueError('complete 6/4/8 variant split required')
     if len({case.edition for case in cases}) != 1 or any(case.split != split for case in cases):
@@ -385,14 +439,19 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
     if protected:
         from .edition_registry import EligibilityContext
         from .eligibility import variant_identity
-        if not isinstance(eligibility, EligibilityContext) or not attempt_request_id:
+        if type(eligibility) not in (EligibilityContext, PublicLiveContext) or not attempt_request_id:
             raise ValueError('exact registered eligibility context and attempt request required')
         eligibility.validate()
-        if (freeze != eligibility.freeze or (pins or {}) != eligibility.freeze['pins']
-                or mode != eligibility.suite['mode']
-                or sorted(case.variant_id for case in cases) != eligibility.suite['variant_ids']):
-            raise ValueError('mixed frozen suite configurations')
-        declared = {item['variant_id']: item for item in eligibility.commitment['variants']}
+        if public_live:
+            if split == 'heldout' or freeze is not None or (pins or {}) != eligibility.pins:
+                raise ValueError('T1 authority cannot authorize T2/T3 or stale provisional configuration')
+            declared = {item['variant_id']: item for item in eligibility.catalog['variants']}
+        else:
+            if freeze != eligibility.freeze or (pins or {}) != eligibility.freeze['pins']:
+                raise ValueError('mixed frozen suite configurations')
+            declared = {item['variant_id']: item for item in eligibility.commitment['variants']}
+        if mode != eligibility.suite['mode'] or [case.variant_id for case in cases] != eligibility.suite['variant_ids']:
+            raise ValueError('wrong ordered declared suite')
         if any(variant_identity(case) != declared.get(case.variant_id) for case in cases):
             raise ValueError('actual source/sample/brief/oracle differs from T0')
         started = eligibility.begin(request_id=attempt_request_id, expected_head=expected_registry_head)
@@ -407,7 +466,8 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
     try:
         manifests = [run_variant(case, ports, store, mode=mode, pins=pins,
                       authority=authority, freeze=freeze, custody=custody, _suite_ref=predeclared,
-                      eligibility=eligibility) for case in cases]
+                      eligibility=eligibility, target_ports=target_ports,
+                      target_freeze_sha256=target_freeze_sha256) for case in cases]
         report = {'schema_version': 1, 'declaration': predeclared,
                   'manifests': [item['manifest_capture'] for item in manifests],
                   'summary': summarize_suite(manifests)}
@@ -418,20 +478,21 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
                             for manifest in manifests for item in manifest['results'])
             terminal = ('no_output' if no_output else 'failed' if all(status == 'failed' for status in statuses)
                         else 'partial' if any(status != 'completed' for status in statuses) else 'completed')
-            ending = eligibility.registry.finish(cases[0].edition, eligibility.suite['attempt_id'], terminal,
-                capture, request_id=attempt_request_id + ':finish', expected_head=eligibility.registry.head)
+            ending = eligibility.finish_suite(terminal, capture, request_id=attempt_request_id + ':finish')
             report['attempt_receipt'] = ending.capture
         return {**report, 'suite_capture': capture}
     except BaseException as exc:
         if protected:
             failure = store.put('suite_failure', {'schema_version': 1, 'edition': cases[0].edition,
-                'attempt_id': eligibility.suite['attempt_id'], 'error_type': type(exc).__name__,
+                'attempt_id': eligibility.authority_receipt['payload']['attempt_id'] if public_live else eligibility.suite['attempt_id'],
+                'error_type': type(exc).__name__,
                 'declaration': predeclared})
             state = eligibility.registry.state(cases[0].edition)
-            if state['attempt'] is not None and state['attempt']['status'] == 'running':
-                eligibility.registry.finish(cases[0].edition, eligibility.suite['attempt_id'],
-                    'cancelled' if isinstance(exc, (KeyboardInterrupt, SystemExit)) else 'failed', failure,
-                    request_id=attempt_request_id + ':failure', expected_head=eligibility.registry.head)
+            active = (state['t1']['attempts'].get(eligibility.authority_receipt['payload']['attempt_id'])
+                      if public_live else state['attempt'])
+            if active is not None and active['status'] == 'running':
+                eligibility.finish_suite('cancelled' if isinstance(exc, (KeyboardInterrupt, SystemExit)) else 'failed',
+                    failure, request_id=attempt_request_id + ':failure')
         raise
 
 

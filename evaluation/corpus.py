@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Callable
 
 from .artifacts import CaptureStore, digest, is_sha
-from .benchmark import MALFORMED_KINDS, SPLITS, hidden_run_eligibility
+from .benchmark import MALFORMED_KINDS, SPLITS
 from .generator import attach_refs, canonical_records, inject_malformed, serialize, sha
 
 

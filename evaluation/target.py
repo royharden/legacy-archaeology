@@ -83,7 +83,8 @@ def score_target(oracle: list[dict], observation: dict | None, *,
     actual_pin = observation.get('rows_sha256')
     if actual_pin != digest(observation.get('rows', [])):
         required.append('target_rows_pin')
-    state = 'failed' if report['row_parity'] != 'exact' else 'indeterminate' if required else 'passed'
+    required.append('v2_independent_target_effect_grading_required')
+    state = 'failed' if report['row_parity'] != 'exact' else 'indeterminate'
     return {'schema_version': 1, 'bundle_sha256': bundle_sha256, 'mapping_sha256': mapping_sha256,
             'observation_sha256': digest(observation), 'score': report,
             'row_parity': report['row_parity'], 'target_validation': state,

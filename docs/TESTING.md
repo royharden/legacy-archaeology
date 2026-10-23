@@ -41,3 +41,18 @@ Every case identifies `what_bug_this_catches`. Concrete source issues found whil
 authoring strengthened shared hash/raw-record/generation/candidate validation and
 kept wrong-model billing liability unknown. Assertions remain unexecuted until the
 later activation phase; any failure there must remain visible and be repaired.
+
+Additional unexecuted durability source covers exclusive/failed publication,
+content-bound pointer CAS and epoch ABA, per-run lock exclusion, bounded/duplicate/
+deep JSON, orphan staging and immutable directories, full-stream oversize refusal,
+permitted-only reports, and missing/corrupt cache recovery from actual SQLite state.
+The same journey discovery command includes these cases. No subprocess, source
+stream, lock contender, crypto operation or regression case has been run here.
+
+Evidence-consumer source also checks unknown/unapproved explanations, missing or
+rejected target trust before environment access, public-only key profile rejection,
+and omission of unrestricted legacy execution text from permitted-only reports.
+The signature fault test always rejects; it does not replace real verification
+with a passing callback or execute any crypto operation here.
+
+V7F adds future journey regression SOURCE for all-arm/split not_run templates, omitted failed arms, raw/private projection-field refusal, cached/reasoning and absent-usage categories, unknown liability vs known zero, hidden/public and replay route refusal, immutable report retry/tampering, untrusted T1 extras/changed price refusal before transport, and oracle/custody context refusal. These tests have not been imported, collected or executed. Only AST parsing and focused source review are permitted during Dirty Mode.

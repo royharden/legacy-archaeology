@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable
 
 from .artifacts import canonical, digest, is_sha
 from .benchmark import ARMS, FREEZE_KEYS, SPLITS
@@ -34,19 +33,29 @@ def hashes(value: dict, names) -> None:
 
 
 VARIANT_KEYS = {'variant_id', 'split', 'source_sha256', 'samples_sha256', 'brief_sha256',
-                'oracle_sha256', 'canonical_sha256', 'layout_sha256'}
+                'oracle_sha256', 'canonical_sha256', 'layout_sha256', 'visible_sha256'}
 
 
 def variant_identity(case) -> dict:
     """Commit exact actual case inputs, never transform/decode them for gold."""
     import hashlib
+    source_pins = []
+    for batch in case.batches:
+        actual = hashlib.sha256(bytes.fromhex(batch.visible['source_hex'])).hexdigest()
+        if actual != batch.visible['source_sha256'] or batch.visible['brief'] != case.visible['brief']:
+            raise ValueError('actual batch source/brief differs from declared visible input')
+        source_pins.append(actual)
+    if hashlib.sha256(bytes.fromhex(case.visible['source_hex'])).hexdigest() != case.visible['source_sha256']:
+        raise ValueError('actual inference source differs from declared hash')
     return {'variant_id': case.variant_id, 'split': case.split,
-            'source_sha256': digest([batch.visible['source_sha256'] for batch in case.batches]),
-            'samples_sha256': digest(case.visible['permitted_samples']),
+            'source_sha256': digest(source_pins),
+            'samples_sha256': digest({'inference': case.visible['permitted_samples'],
+                                     'batches': [batch.visible['permitted_samples'] for batch in case.batches]}),
             'brief_sha256': hashlib.sha256(case.visible['brief'].encode('utf-8')).hexdigest(),
             'oracle_sha256': digest([row for batch in case.batches for row in batch.oracle]),
             'canonical_sha256': digest([row['fields'] for batch in case.batches for row in batch.oracle]),
-            'layout_sha256': digest(case.expected_layout)}
+            'layout_sha256': digest(case.expected_layout),
+            'visible_sha256': digest({'inference': case.visible, 'batches': [batch.visible for batch in case.batches]})}
 
 
 def validate_commitment(value: dict) -> dict:
@@ -75,8 +84,11 @@ def validate_commitment(value: dict) -> dict:
 
 
 def validate_freeze(value: dict, commitment: dict) -> dict:
-    item = closed(value, {'schema_version', 'stage', 'edition', 'commitment_sha256', 'nonce',
-                         'pins', 'freeze_sha256'}, 'T2')
+    keys = {'schema_version', 'stage', 'edition', 'commitment_sha256', 'nonce', 'pins', 'freeze_sha256'}
+    if isinstance(value, dict) and 'selection_sha256' in value:
+        keys.add('selection_sha256')
+        hashes(value, ('selection_sha256',))
+    item = closed(value, keys, 'T2')
     t0 = validate_commitment(commitment)
     if item['stage'] != 'T2' or item['edition'] != t0['edition'] or item['commitment_sha256'] != t0['commitment_sha256']:
         raise ValueError('T2 edition/commitment mismatch')
@@ -97,10 +109,11 @@ def make_commitment(*, edition: str, variants: list[dict], sealed_assets_sha256:
     return validate_commitment({**item, 'commitment_sha256': digest(item)})
 
 
-def make_freeze(commitment: dict, pins: dict) -> dict:
+def make_freeze(commitment: dict, pins: dict, *, selection_sha256=None) -> dict:
     t0 = validate_commitment(commitment)
     item = {'schema_version': 1, 'stage': 'T2', 'edition': t0['edition'],
             'commitment_sha256': t0['commitment_sha256'], 'nonce': t0['nonce'], 'pins': deepcopy(pins)}
+    if selection_sha256 is not None: item['selection_sha256'] = selection_sha256
     return validate_freeze({**item, 'freeze_sha256': digest(item)}, t0)
 
 
@@ -108,26 +121,44 @@ def make_freeze(commitment: dict, pins: dict) -> dict:
 class ReceiptVerifier:
     """Trusted operator configuration, never populated from a candidate JSON file.
 
-    verify_signature(key_id, canonical_payload, signature) must implement actual
-    cryptography. Issuer roles/key trust and the verifier itself stay evaluator-
-    owned; inference must have neither signing keys nor a signing/broker endpoint.
-    A verifier that returns True unconditionally is invalid operator setup.
+    Ed25519 verification uses configured public keys, not a callback returning a
+    supplied boolean. Keys/issuer roles stay evaluator-owned; inference may see
+    public keys, never signing keys or a signing/broker endpoint. Dependency
+    loading is lazy; missing cryptography fails closed, never installs it.
     """
     trusted_issuers: dict[str, tuple[str, str]]  # key_id -> (issuer, role)
-    verify_signature: Callable[[str, bytes, str], bool]
+    public_keys: dict[str, bytes]
+
+    def __post_init__(self):
+        if (not isinstance(self.public_keys, dict) or set(self.public_keys) != set(self.trusted_issuers)
+                or any(type(key) is not bytes or len(key) != 32 for key in self.public_keys.values())
+                or len(set(self.public_keys.values())) != len(self.public_keys)):
+            raise ValueError('distinct configured Ed25519 public keys required; verifier callbacks are forbidden')
 
     def verify(self, receipt: dict, role: str) -> dict:
-        envelope = closed(receipt, {'schema_version', 'issuer', 'key_id', 'role', 'payload',
+        envelope = closed(receipt, {'schema_version', 'algorithm', 'issuer', 'key_id', 'role', 'payload',
                                     'payload_sha256', 'signature'}, 'signed receipt')
         for key in ('issuer', 'key_id', 'role'):
             text(envelope[key], key)
         if self.trusted_issuers.get(envelope['key_id']) != (envelope['issuer'], role) or envelope['role'] != role:
             raise ValueError('untrusted evidence issuer/role')
         text(envelope['signature'], 'signature', 16384)
+        signature = envelope['signature']
+        if (envelope['algorithm'] != 'Ed25519' or len(signature) != 128
+                or any(character not in '0123456789abcdef' for character in signature)):
+            raise ValueError('exact Ed25519 signature encoding required')
         if envelope['payload_sha256'] != digest(envelope['payload']):
             raise ValueError('signed payload hash mismatch')
-        if self.verify_signature(envelope['key_id'], canonical(envelope['payload']), envelope['signature']) is not True:
-            raise ValueError('evidence signature verification failed')
+        try:
+            from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        except ImportError:
+            raise ValueError('Ed25519 dependency unavailable; custody remains unverified') from None
+        try:
+            Ed25519PublicKey.from_public_bytes(self.public_keys[envelope['key_id']]).verify(
+                bytes.fromhex(signature), canonical(envelope['payload']))
+        except (InvalidSignature, UnsupportedAlgorithm):
+            raise ValueError('evidence signature verification failed or unsupported') from None
         return deepcopy(envelope['payload'])
 
 
@@ -148,6 +179,7 @@ def validate_custody(probe_receipt: dict, review_receipts: list[dict], *, commit
     prerequisites; structural JSON validation alone cannot establish isolation.
     """
     t2 = validate_freeze(freeze, commitment)
+    text(expected_identity, 'expected inference identity'); text(expected_host, 'expected host')
     probe = closed(verifier.verify(probe_receipt, 'canary_observer'), PROBE_KEYS, 'canary observation')
     if probe['kind'] != 'observed_canary_probe':
         raise ValueError('actual canary observation kind required')
@@ -161,6 +193,7 @@ def validate_custody(probe_receipt: dict, review_receipts: list[dict], *, commit
     hashes(probe, ('freeze_sha256', 'nonce', 'collector_sha256', 'observed_source_sha256',
                    'observed_config_sha256', 'canary_file_sha256', 'canary_directory_sha256', 'observation_sha256'))
     text(probe['observed_at'], 'observation time')
+    text(probe['identity'], 'observed identity'); text(probe['host'], 'observed host')
     if probe['observation_sha256'] != digest({key: val for key, val in probe.items() if key != 'observation_sha256'}):
         raise ValueError('canary observation hash mismatch')
     if not isinstance(probe['probes'], list) or len(probe['probes']) != 3:

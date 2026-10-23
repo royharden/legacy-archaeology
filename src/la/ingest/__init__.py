@@ -1,9 +1,9 @@
 """Byte framing with retained separators and separately authorized evidence."""
 from collections import Counter
 from la.contracts import digest, sha256, validate_batch
+from la.contracts.evidence import validate_intake_metadata, validate_sample_metadata
 from .evidence import authorize_samples, resolve_evidence, verify_records
-
-LIMITS = {'bytes': 5 * 1024 * 1024, 'records': 10000, 'width': 256, 'brief': 4000}
+from .limits import LIMITS
 
 
 def ingest_bytes(data: bytes, brief: str, permitted_samples: dict, *, declared_encoding='ASCII',
@@ -80,6 +80,8 @@ def ingest_bytes(data: bytes, brief: str, permitted_samples: dict, *, declared_e
     samples, sample_reasons = authorize_samples(dict(source_sha256=source, framing_sha256=framing_hash, records=records), permitted_samples)
     reasons.extend(sample_reasons)
     samples['intake'] = intake
+    intake = validate_intake_metadata(intake)
+    samples = validate_sample_metadata(samples)
     return validate_batch(dict(schema_version=1, source_sha256=source, framing_sha256=framing_hash,
         framing=framing, encoding='ASCII', declared_format=declarations, width=width,
         status='refused' if reasons else 'accepted', reasons=sorted(set(reasons)), records=records,
@@ -88,4 +90,4 @@ def ingest_bytes(data: bytes, brief: str, permitted_samples: dict, *, declared_e
 
 
 def intake_metadata(batch: dict) -> dict:
-    return batch['samples']['intake']
+    return validate_intake_metadata(batch['samples']['intake'])

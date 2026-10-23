@@ -193,6 +193,16 @@ class OfflineVerifier(unittest.TestCase):
         self.assertEqual(result['target_validation'], 'not_run')
         self.assertEqual(result['reason'], 'external_expected_bundle_pin_required')
 
+    def test_target_wrong_pin_returns_structured_offline_failure_without_driver(self):
+        config = TargetConfig('explicit-authority', 'disposable', 'leastpriv', 'pinned-version', 17,
+                              expected_bundle_sha256='f' * 64)
+        with patch('la.postgres.execution.driver_and_connect', side_effect=AssertionError('must not connect')):
+            result = database_check(self.bundle, dsn='unused', authorized=True, target_config=config)
+        self.assertEqual(result['target_validation'], 'failed')
+        self.assertEqual(result['execution_status'], 'refused_before_connection')
+        self.assertIn('external_pin_mismatch', self.codes(result['verification']))
+        self.assertEqual(result['verification']['target_validation'], 'not_run')
+
     def test_entire_alternate_valid_bundle_does_not_match_external_original_pin(self):
         changed = [b'0008' + RAW[0][4:], RAW[1], RAW[2]]
         batch, generation = fixture(raw_rows=changed)

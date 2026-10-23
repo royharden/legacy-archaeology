@@ -316,4 +316,5 @@ def export_bundle(destination, batch: dict, mapping: dict, outcomes: list[dict],
 
 
 from .proposal import validate_proposal, transform_proposal
-from .bundle import verify_bundle, write_verification_receipt
+from .bundle import bundle_limits, verify_bundle, write_verification_receipt
+from .provenance import producer_code_pin
