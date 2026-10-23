@@ -3,6 +3,19 @@
 Source construction only. These expectations require a later independent audit;
 this table is not executed test evidence.
 
+Public corpus-v2 SOURCE covers all three signs, scales 0/2/3, both date formats
+with explicit 1970–2069 windows, blank/all-nines sentinels, left/right/no padding,
+both separators, terminal-newline absence and distinct-ordinal business duplicates.
+Its six variants and ten-batch loops have not been executed or materialized.
+Precision-seven values are serialized into eight zero-filled digit positions;
+an eight-significant-digit malformed value intentionally overflows that policy.
+The fixture encoder never decodes candidate output to obtain canonical values.
+
+The eleven value/identity mutations and three lineage/load mutations now have
+callable source in `mutation_audit.py`. A later audit must first establish an
+exact positive control and independently inspect detection; no source assertion
+in this document establishes a passed mutation suite.
+
 | Edge | Declared policy/input | Required independent result |
 |---|---|---|
 | Leading zero | text ID `000001` | text `000001`, never integer 1 |
@@ -15,7 +28,7 @@ this table is not executed test evidence.
 | Leap date | YYYYMMDD `20240229` | date `2024-02-29` |
 | Invalid date | YYYYMMDD `20230229` | quarantine invalid_date |
 | Ambiguous year | YYMMDD `240101`, no century window | unresolved policy, never invented century |
-| Sentinel | explicit `00000000` -> null | typed date NULL |
+| Sentinel | explicit `99999999` -> null | typed date NULL; zero date remains invalid |
 | Padding | declared right-space trim | trim only declared spaces; reject other declared-invalid padding |
 | Framing | LF or CRLF consistent | exact byte offsets; separator excluded from raw hash |
 | Final newline | absent, full record width | accepted with declared final-newline policy |

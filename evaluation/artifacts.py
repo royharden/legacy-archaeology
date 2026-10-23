@@ -1,0 +1,99 @@
+"""Evaluator-owned immutable captures. No application imports or hidden creation."""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=False, allow_nan=False).encode('utf-8')
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def is_sha(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
+
+
+class CaptureStore:
+    """Content-addressed, exclusive-create files under one explicitly owned root.
+
+    A matching pre-existing object is an idempotent capture, never an overwrite.
+    Callers must place active hidden captures outside inference-readable storage.
+    OS custody is a separate precondition, not established by this path check.
+    """
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root).resolve(strict=True)
+        if not self.root.is_dir():
+            raise ValueError('capture root must already be an owned directory')
+
+    def put(self, kind: str, payload: object) -> dict:
+        if not kind or any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for c in kind):
+            raise ValueError('invalid capture kind')
+        envelope = {'schema_version': 1, 'kind': kind, 'payload': payload}
+        data = canonical(envelope)
+        sha = hashlib.sha256(data).hexdigest()
+        path = self.root / (sha + '.json')
+        if path.is_symlink() or path.resolve().parent != self.root:
+            raise ValueError('capture path escape')
+        try:
+            with path.open('xb') as handle:
+                handle.write(data)
+                handle.flush()
+                import os
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise ValueError('immutable capture collision') from None
+        return {'sha256': sha, 'kind': kind, 'bytes': len(data)}
+
+    def get(self, reference: dict, *, kind: str | None = None) -> object:
+        sha = reference.get('sha256')
+        if not is_sha(sha):
+            raise ValueError('invalid capture hash')
+        path = self.root / (sha + '.json')
+        if path.is_symlink() or path.resolve(strict=True).parent != self.root:
+            raise ValueError('capture path escape')
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise ValueError('capture hash mismatch')
+        envelope = json.loads(data)
+        if canonical(envelope) != data or envelope.get('schema_version') != 1:
+            raise ValueError('noncanonical capture')
+        expected_kind = kind or reference.get('kind')
+        if envelope.get('kind') != expected_kind:
+            raise ValueError('capture kind mismatch')
+        return envelope['payload']
+
+
+def retire_archive(store: CaptureStore, manifest: dict, *, release: dict, registry=None) -> dict:
+    """New retirement receipt; never rewrites the sealed raw manifest.
+
+    This records supplied evaluator authorization, not publication or OS isolation.
+    No active oracle is generated/exported by this interface.
+    """
+    if release.get('authorized') is not True or release.get('edition') != manifest.get('edition'):
+        raise ValueError('edition-specific evaluator retirement authority required')
+    if not is_sha(release.get('authority_sha256')):
+        raise ValueError('retirement authority evidence required')
+    journal_event = None
+    if manifest.get('split') == 'heldout':
+        from .edition_registry import EditionRegistry
+        if not isinstance(registry, EditionRegistry) or registry.store.root != store.root:
+            raise ValueError('hidden retirement requires signed disposition in the edition registry')
+        state = registry.state(manifest['edition'])
+        events = [event for event in registry.events() if event['edition'] == manifest['edition']
+                  and event['event_type'] == 'retired']
+        if (not state['retired'] or not events or state['attempt'] is None
+                or state['attempt']['status'] == 'running'
+                or manifest.get('freeze_sha256') != state['freeze']['freeze_sha256']):
+            raise ValueError('edition is not retired from this exact consumed frozen attempt')
+        journal_event = events[-1]['event_sha256']
+    return store.put('retirement', {'manifest_sha256': digest(manifest),
+                     'edition': manifest['edition'], 'release': release,
+                     'registry_event_sha256': journal_event})

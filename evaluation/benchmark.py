@@ -58,7 +58,11 @@ def freeze_configuration(pins: dict, commitment_sha256: str) -> dict:
 
 
 def hidden_run_eligibility(freeze: dict | None, custody: dict | None) -> dict:
-    """Custody is externally supplied evidence, never inferred from cwd/imports."""
+    """Legacy structural diagnostic only, never actual runner authorization.
+
+    JSON flags/hash strings do not establish OS isolation. Use the signed captured
+    observation + append-only edition registry API for an execution decision.
+    """
     missing = []
     if not freeze:
         missing.append('missing_T2_freeze')
@@ -74,7 +78,9 @@ def hidden_run_eligibility(freeze: dict | None, custody: dict | None) -> dict:
             missing.append(key)
     if not custody or not custody.get('evidence_sha256'):
         missing.append('custody_evidence_pin')
-    return {'eligible': not missing, 'missing': missing,
+    return {'eligible': False, 'structurally_complete': not missing,
+            'eligibility_level': 'unverified_structural_only',
+            'missing': missing + ['verified_observation_receipts_and_edition_registry_required'],
             'benchmark_status': 'not_run', 'product_acceptance': 'pending'}
 
 

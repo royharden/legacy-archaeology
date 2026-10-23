@@ -18,5 +18,11 @@
     {"method":"R1","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null}
   ],
   "measurements": null,
+  "source_interfaces": ["five-arm runner", "immutable capture and retired replay", "canonical-first six-development-variant builder", "finite value and control mutations", "D5 concrete target-receipt scoring"],
+  "new_public_corpus": "descriptor only; not generated",
+  "mutation_audit": "not_run",
+  "scorer_version": "semantic-v2",
+  "regression_source": {"path":"tests/evaluation", "execution":"not_run", "collection":"not_run"},
+  "public_fixture_edition": "public-development-v2",
   "limitations": ["public fixture is development only", "no independent oracle/scorer audit", "no fresh hidden edition", "no target readback"]
 }

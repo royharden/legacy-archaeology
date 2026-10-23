@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
   "status": "not_run",
+  "implementation": "evaluation.mutation_audit",
+  "positive_control": "exact nonempty independent semantic parity required before audit",
+  "inapplicable_is_pass": false,
   "purpose": "Finite later mutation audit specifications; no universal safety claim",
   "mutations": [
     {"id":"wrong_amount","change":"one converted balance +0.01 at identical scale","expected":"semantic balance mismatch"},

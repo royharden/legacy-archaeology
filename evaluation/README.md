@@ -28,7 +28,95 @@ decoding algorithm.
 
 `benchmark.py` defines B0/B1/C0/R0/R1 budgets, the 6/4/8-variant corpus
 contract, T0 commitment and T2 hash freeze, custody eligibility, a twelve-question
-offered-ID simulated SME, and report skeletons. No arm implementation runs here.
+offered-ID simulated SME, and report skeletons. `runner.py` now implements
+`run_variant(case, ports, store, mode='mock', ...)`, `run_suite(cases, ports,
+store, split=..., ...)`, `summarize_suite(manifests)` and `replay_archive(...)`.
+These are executable source interfaces; none has been executed in construction.
+
+`RunnerPorts` injects heuristic, finite candidates, questions, mapping resolution,
+common mapping validation/conversion, provider, token counter and optional target
+observer functions. It imports no product code. A `VariantCase` has identical
+allowlisted visible input for all five arms and ten `BatchCase` values; gold and
+sealed offered-choice policy stay evaluator-only. B1 invokes the bounded provider
+gateway once without repairs. R1 returns only offered IDs with `agent_provisional`
+provenance. Provider adapters are trusted capabilities, not a Python sandbox;
+they must use the gateway rather than make untracked calls. Real OS isolation,
+provider compatibility and custody evidence remain later prerequisites.
+
+`CaptureStore(existing_owned_root)` creates canonical SHA256-addressed exclusive
+files for raw requests/replies, proposals, outcomes and receipts. It never overwrites
+failed outputs. An arm failure/no-output preserves the full oracle denominator.
+Public/retired replay verifies capture hashes and rescoring never calls a model.
+Hidden replay requires an edition-bound retirement receipt. Live/hidden execution
+requires explicit authority, T2 pins, external custody evidence and a capture-root
+binding; a hidden suite retains a one-edition marker even after cancellation.
+No active hidden assets are constructed by these interfaces.
+
+`corpus.development_layouts()` and `build_development_variant('dev-01')` through
+`dev-06` construct six distinct public layout combinations. Canonical semantic
+records come first, then independent serialization, then declared malformed-byte
+replacement and final source/ordinal identities. Each source builder returns ten
+100-record batches with 30 malformed records total, five of each declared kind.
+The hand-authored `fixtures/dev/corpus-v2.json` is a descriptor, not generated
+batches. No new corpus has been generated here. `variant_case` adapts public
+corpus objects to runner cases. The first batch supplies the same authorized
+inference samples for every arm; each mapping is then applied to every batch.
+Local builders reject hidden/validation creation. `request_external_edition`
+requires explicit external evaluator capability, edition/seal/root/custody pins,
+and a heldout freeze with at least two sealed unseen combinations.
+
+`mutation_audit.apply_outcome_mutation` implements the eleven normalized outcome
+mutations listed in `mutations.json`; `audit_scorer_mutations` first requires an
+exact nonempty positive control. Missing prerequisites are inapplicable, never a
+pass. Control mutations separately probe changed evidence, stale approval and
+incomplete load against an injected rejection adapter, retaining candidate-bound
+rejection and before/after durable observations. Audit source has not executed.
+The scorer is now `semantic-v2`; invalid RecordRefs and malformed wire fields
+remain failures in complete denominators. R0 resolved-but-wrong fields are named.
+
+`adapters.project_product_question` returns `{question, provenance}`; only
+`question` crosses the broker. `validate_evaluator_proposal` and
+`transform_evaluator_proposal` inject `ingest`, `validate_proposal` and
+`transform_proposal` functions from the integration owner. They consume D5's
+non-loadable `la.convert.proposal` API without manufacturing ruling events or
+approvals. D7 wraps them as the runner validation/transform callbacks. No product
+module is imported into evaluator source or canonical generation.
+
+`target.score_execution_receipt(oracle, receipt, mapping, bundle_sha256=...,
+edition=...)` directly consumes D5's sealed `database_check`/`reconcile_commit`
+receipt and its `{bundle_sha256,run_id,namespace,target,capture,rows,
+observations_sha256}` observation artifact. It verifies both hashes and lineage,
+then independently scores actual rows. Exact parity remains `indeterminate` for
+full target acceptance when concrete negative effects are absent; adapter
+`producer_projection_match` and rollback booleans do not substitute.
+`target.score_target` also accepts richer committed fresh-readback observations
+with observed column types, separate connection provenance and explicit
+rollback/constraint/recovery effects. `observe_and_score` is a separate explicitly
+authorized injected target action; ordinary inference orchestration never invokes
+the target. All target execution and security behavior remains unverified.
 `mutations.json` specifies the finite later negative audit. `edges.md` records
 hand-calculated expectations. `not_run_report()` returns all arm/split entries
 with null measurements; none should be displayed as measured zero or success.
+
+Regression source is under `tests/evaluation/`: hand-written gold checks complete
+denominators, semantic/type/null/scale/date errors, missing/extra/duplicate/swapped
+identities, false quarantine, cancelling amounts and drop+duplicate. Fake-port
+cases cover one-shot B1, identical inputs, offered-only R1/unknown, unknown cost,
+live/hidden refusal, empty output, immutable/tampered captures, retirement/replay,
+non-loadable proposals and actual D5 target receipt lineage. Public corpus cases
+use hand-calculated byte strings and the documented framing-v2 descriptor.
+No test imports a product parser/converter to construct canonical gold.
+
+After Dirty Mode closes and INT authorizes execution, the future outer-shell
+command is `python -m unittest discover -s legacy-archaeology/tests/evaluation -p "test_*.py"`.
+It needs only the standard library for these evaluator tests. This command has
+**not** been executed, collected or imported here. AST parsing confirms source
+syntax only; assertions, generators, real target behavior and benchmark
+performance remain unverified.
+
+Public `account-dev-01` is explicitly development edition v2. Its sole date-null
+lexeme is now `99999999`; zero-date lexemes remain invalid under the selected
+policy. Canonical semantic values were retained unchanged while exact source,
+sample and framing-v2 RecordRef hashes were reauthored from the literal bytes.
+Initial public files are preserved in Git history and dated local backups; no
+measured result was rewritten and neither public edition is unseen holdout.

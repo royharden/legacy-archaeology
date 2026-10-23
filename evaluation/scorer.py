@@ -12,8 +12,14 @@ REF_KEYS = ('source_sha256', 'framing_sha256', 'ordinal', 'byte_start', 'length'
 
 def identity(ref: dict) -> tuple:
     """Only declared RecordRef identity; never business-key or fuzzy matching."""
-    if any(key not in ref for key in REF_KEYS):
+    if not isinstance(ref, dict) or any(key not in ref for key in REF_KEYS):
         raise ValueError('incomplete RecordRef')
+    if any(type(ref[key]) is not int or ref[key] < 0 for key in ('ordinal', 'byte_start', 'length')):
+        raise ValueError('invalid ordinal/byte identity')
+    if any(not isinstance(ref[key], str) or len(ref[key]) != 64 or
+           any(c not in '0123456789abcdef' for c in ref[key])
+           for key in ('source_sha256', 'framing_sha256', 'raw_sha256')):
+        raise ValueError('invalid RecordRef hash')
     return tuple(ref[key] for key in REF_KEYS)
 
 
@@ -42,6 +48,13 @@ def _rate(numerator: int, denominator: int) -> dict:
             'rate': numerator / denominator if denominator else None}
 
 
+def _reasons(row: dict) -> set[str]:
+    reasons = row.get('reasons', [])
+    if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
+        return {'invalid_reason_wire'}
+    return set(reasons)
+
+
 def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'development') -> dict:
     """Score normalized outcomes with fields of {semantic_id: {data_type,value}}.
 
@@ -61,6 +74,8 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
     invalid_refs = []
     for position, row in enumerate(outcomes):
         try:
+            if not isinstance(row, dict):
+                raise ValueError('invalid outcome')
             observed[identity(row['record_ref'])].append(row)
         except (KeyError, ValueError, TypeError):
             invalid_refs.append(position)
@@ -80,11 +95,11 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
         actual = rows[0] if len(rows) == 1 else None
         expected_kind = oracle['expected_outcome']
         if expected_kind == 'quarantined':
-            quarantine_expected.update(set(oracle.get('reasons', [])))
+            quarantine_expected.update(_reasons(oracle))
         # All emitted quarantines count, including duplicates; precision cannot cherry-pick.
         for row in rows:
             if row.get('outcome') == 'quarantined':
-                quarantine_observed.update(set(row.get('reasons', [])))
+                quarantine_observed.update(_reasons(row))
         if expected_kind == 'converted':
             valid += 1
             fields = oracle['fields']
@@ -93,9 +108,11 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
             for name, field in fields.items():
                 expected_null[name] += field['value'] is None
                 expected_empty[name] += field['value'] == ''
-            if actual and actual.get('outcome') == 'quarantined':
+            if any(row.get('outcome') == 'quarantined' for row in rows):
                 false_quarantine += 1
             got = actual.get('fields', {}) if actual and actual.get('outcome') == 'converted' else {}
+            if not isinstance(got, dict):
+                got = {}
             matches = {name: _equal(fields[name], got.get(name)) for name in FIELDS}
             correct_fields += sum(matches.values())
             resolved += sum(name in got for name in FIELDS)
@@ -110,21 +127,24 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
                               'observed_count': len(rows), 'observed_outcome': actual.get('outcome') if actual else None})
         elif expected_kind == 'quarantined':
             exact = bool(actual and actual.get('outcome') == 'quarantined' and
-                         set(actual.get('reasons', [])) == set(oracle.get('reasons', [])))
+                         _reasons(actual) == _reasons(oracle))
             correct_outcomes += exact
             if exact:
-                quarantine_correct.update(set(oracle.get('reasons', [])))
+                quarantine_correct.update(_reasons(oracle))
             else:
                 diffs.append({'record_ref': oracle['record_ref'], 'kind': 'quarantine_mismatch'})
         else:
             raise ValueError('unsupported oracle outcome; unsupported fixtures score separately')
     # Diagnostics include every emitted row, even extra or duplicated identities.
-    outcomes_count = Counter(row.get('outcome', 'unknown') for row in outcomes)
+    outcomes_count = Counter(row.get('outcome', 'unknown') if isinstance(row, dict)
+                             and isinstance(row.get('outcome', 'unknown'), str) else 'invalid' for row in outcomes)
     for row in outcomes:
-        if row.get('outcome') != 'converted':
+        if not isinstance(row, dict) or row.get('outcome') != 'converted':
             continue
         got = row.get('fields', {})
-        if 'status' in got:
+        if not isinstance(got, dict):
+            continue
+        if isinstance(got.get('status'), dict) and isinstance(got['status'].get('value'), (str, type(None))):
             actual_status[got['status'].get('value')] += 1
         try:
             value = Decimal(got['balance']['value'])
@@ -133,6 +153,8 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
         except (KeyError, TypeError, InvalidOperation):
             pass
         for name, field in got.items():
+            if not isinstance(field, dict):
+                continue
             actual_null[name] += field.get('value') is None
             actual_empty[name] += field.get('value') == ''
     extra = [{'record_ref': rows[0]['record_ref'], 'count': len(rows)}
@@ -142,13 +164,15 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
         if key not in expected:
             for row in rows:
                 if row.get('outcome') == 'quarantined':
-                    quarantine_observed.update(set(row.get('reasons', [])))
+                    quarantine_observed.update(_reasons(row))
     reasons = sorted(set(quarantine_expected) | set(quarantine_observed))
-    return {'schema_version': 1, 'scorer_version': 'semantic-v1', 'edition': edition,
+    return {'schema_version': 1, 'scorer_version': 'semantic-v2', 'edition': edition,
             'semantic_rows': _rate(correct_rows, valid), 'semantic_fields': _rate(correct_fields, valid * 5),
             'all_record_outcomes': _rate(correct_outcomes, len(expected)),
             'resolved_field_coverage': _rate(resolved, valid * 5),
             'accepted_only_precision': _rate(resolved_correct, resolved),
+            'resolved_but_wrong_fields': resolved - resolved_correct,
+            'unresolved_or_missing_fields': valid * 5 - resolved,
             'false_quarantine': false_quarantine, 'missing': missing, 'extra': extra,
             'duplicates': duplicates, 'invalid_record_refs': invalid_refs, 'diffs': diffs,
             'quarantine_by_reason': {reason: {'precision': _rate(quarantine_correct[reason], quarantine_observed[reason]),
@@ -185,10 +209,13 @@ def score_product(oracle_records: list[dict], outcomes: list[dict], mapping: dic
     types = {name: kinds[0] if len(kinds) == 1 else None for name, kinds in declared.items()}
     normalized = []
     for row in outcomes:
-        normalized.append({'record_ref': row['record_ref'], 'outcome': row['outcome'],
-            'reasons': row.get('reasons', []),
+        if not isinstance(row, dict):
+            normalized.append({})
+            continue
+        normalized.append({'record_ref': row.get('record_ref', {}), 'outcome': row.get('outcome', 'invalid'),
+            'reasons': row.get('reasons', []) if isinstance(row.get('reasons', []), list) else [],
             'fields': {name: {'data_type': types.get(name), 'value': value}
-                       for name, value in row.get('values', {}).items()}})
+                       for name, value in (row.get('values') if isinstance(row.get('values'), dict) else {}).items()}})
     report = score(oracle_records, normalized, edition=edition)
     report['mapping_completeness'] = {'missing_targets': sorted(set(FIELDS) - set(declared)),
         'extra_targets': sorted(set(declared) - set(FIELDS)),

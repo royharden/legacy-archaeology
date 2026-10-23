@@ -20,6 +20,20 @@ def sha256(value: bytes) -> str:
 class Boundary(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
 
+    @model_validator(mode='before')
+    @classmethod
+    def hash_shapes(cls, value):
+        if isinstance(value, dict):
+            if 'schema_version' in value and type(value['schema_version']) is not int:
+                raise ValueError('schema_version must be an exact integer')
+            ids = {'id', 'event_id', 'previous_event_id', 'question_id', 'generation_binding'}
+            for key, item in value.items():
+                if item is None or key not in cls.model_fields: continue
+                if key.endswith('_sha256') or key in ids:
+                    if type(item) is not str or len(item) != 64 or any(c not in '0123456789abcdef' for c in item):
+                        raise ValueError('invalid SHA256 identity: '+key)
+        return value
+
 class RecordRef(Boundary):
     source_sha256: str
     framing_sha256: str
@@ -30,6 +44,16 @@ class RecordRef(Boundary):
     raw_hex: str
     disposition: Literal['eligible', 'quarantined']
     reasons: list[str]
+
+    @model_validator(mode='after')
+    def raw_identity(self):
+        try:
+            raw = bytes.fromhex(self.raw_hex)
+        except ValueError:
+            raise ValueError('invalid record hex') from None
+        if raw.hex() != self.raw_hex or len(raw) != self.length or sha256(raw) != self.raw_sha256:
+            raise ValueError('record bytes/length/hash mismatch')
+        return self
 
 class SourceBatch(Boundary):
     schema_version: Literal[1] = 1
@@ -45,6 +69,7 @@ class SourceBatch(Boundary):
     brief_sha256: str
     samples: dict[str, Any]
     config_sha256: str
+    intake: dict[str, Any] = Field(default_factory=dict)
 
 class FieldCandidate(Boundary):
     id: str
@@ -75,6 +100,9 @@ class FieldCandidate(Boundary):
             raise ValueError('unsupported padding side')
         for name in ('trim','nullable'):
             if name in self.policy and type(self.policy[name]) is not bool: raise ValueError('policy booleans must be typed')
+        value = self.model_dump(exclude_unset=True)
+        if digest({k:v for k,v in value.items() if k != 'id'}) != self.id:
+            raise ValueError('candidate identity mismatch')
         return self
 
 class MappingSpec(Boundary):
@@ -177,9 +205,26 @@ class Generation(Boundary):
     candidates: list[FieldCandidate]
     unknowns: list[str]
     mode: Literal['rules', 'mock']
+    discovery: dict[str, Any] = Field(default_factory=dict)
+    filler: list[dict[str, int]] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def content_identity(self):
+        value = self.model_dump(exclude_unset=True)
+        if digest({k:v for k,v in value.items() if k != 'generation_sha256'}) != self.generation_sha256:
+            raise ValueError('generation content hash mismatch')
+        ids = [candidate.id for candidate in self.candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError('duplicate candidate identity')
+        for span in self.filler:
+            if set(span) != {'start', 'end'} or not 0 <= span['start'] < span['end']:
+                raise ValueError('invalid explicit filler span')
+        return self
 
 def validate_batch(value: dict) -> dict:
-    return SourceBatch.model_validate(value).model_dump()
+    # Optional additive diagnostics must not materialize absent fields and alter
+    # already-pinned producer hashes. Supplied diagnostics remain hash-bound.
+    return SourceBatch.model_validate(value).model_dump(exclude_unset=True)
 
 def validate_generation(value: dict) -> dict:
-    return Generation.model_validate(value).model_dump()
+    return Generation.model_validate(value).model_dump(exclude_unset=True)

@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import os
 from datetime import date
 from decimal import Decimal, localcontext
 from pathlib import Path
 
 from la.contracts import Approval, MappingSpec, MigrationBundle, RowOutcome, validate_batch
 from la.review import REQUIRED, canonical, digest
+from la.review.policy import validate_policy
 
 
 class ConversionError(ValueError):
@@ -19,17 +21,25 @@ class ConversionError(ValueError):
 def decode_value(raw: bytes, field: dict):
     """Apply only declared ASCII policies; decimal values remain exact wire strings."""
     try:
+        validate_policy(field)
+    except ValueError as exc:
+        raise ConversionError('invalid_declared_policy') from exc
+    if len(raw) != field['end'] - field['start']:
+        raise ConversionError('wrong_field_length')
+    try:
         lexeme = raw.decode('ascii')
     except UnicodeDecodeError as exc:
         raise ConversionError('high_byte') from exc
     policy = field['policy']
+    if '\x00' in lexeme:
+        raise ConversionError('nul_byte')
     sentinels = policy.get('sentinels', {})
     if lexeme in sentinels:
         if sentinels[lexeme] != 'null' or not policy.get('nullable', False):
             raise ConversionError('invalid_sentinel_policy')
         return None
-    pad = policy.get('padding_byte', ' ')
-    side = policy.get('padding_side', 'none')
+    pad = policy['padding_byte']
+    side = policy['padding_side']
     if len(pad) != 1 or ord(pad) > 127 or side not in ('none', 'left', 'right'):
         raise ConversionError('invalid_padding_policy')
     value = lexeme
@@ -40,9 +50,9 @@ def decode_value(raw: bytes, field: dict):
             value = value.rstrip(pad)
         else:
             raise ConversionError('invalid_padding_policy')
-    if side == 'left' and value.endswith(pad) and pad == ' ':
+    if policy['trim'] and side == 'left' and value and value.endswith(pad) and pad == ' ':
         raise ConversionError('invalid_padding')
-    if side == 'right' and value.startswith(pad) and pad == ' ':
+    if policy['trim'] and side == 'right' and value and value.startswith(pad) and pad == ' ':
         raise ConversionError('invalid_padding')
     data_type = field['data_type']
     if data_type == 'text':
@@ -98,25 +108,28 @@ def validate_mapping(batch, mapping, *, require_complete=False):
             raise ValueError(f'mapping source mismatch: {key}')
     names, covered = set(), set()
     width = mapping['width']
+    if width is not None and (type(width) is not int or not 1 <= width <= 256):
+        raise ValueError('invalid record width')
+    if len(mapping['fields']) > 32 or len(set(mapping['supporting_event_ids'])) != len(mapping['supporting_event_ids']):
+        raise ValueError('invalid field/supporting-event cardinality')
     for field in mapping['fields']:
         name = field['semantic_target']
         if name not in REQUIRED or name in names:
             raise ValueError('invalid or duplicate semantic target')
         names.add(name)
         policy = field['policy']
+        try:
+            validate_policy(field)
+        except ValueError:
+            if mapping['mapping_status'] == 'complete' or require_complete or not mapping['unresolved']:
+                raise
+        if digest({k: v for k, v in field.items() if k != 'id'}) != field['id']:
+            raise ValueError('mapping candidate identity mismatch')
         if field['data_type'] not in ('text', 'decimal', 'date'):
             raise ValueError('unsupported field type')
         expected_type = 'decimal' if name == 'balance' else 'date' if name == 'effective_date' else 'text'
         if field['data_type'] != expected_type:
             raise ValueError('semantic target type mismatch')
-        if policy.get('padding_side', 'none') not in ('none', 'left', 'right') or len(policy.get('padding_byte', ' ')) != 1:
-            raise ValueError('invalid padding policy')
-        if field['data_type'] == 'decimal':
-            scale, precision = policy.get('scale'), policy.get('precision')
-            if scale not in (0, 2, 3) or type(precision) is not int or not max(1, scale) <= precision <= 1000 or policy.get('sign') not in ('leading', 'trailing', 'unsigned'):
-                raise ValueError('invalid decimal policy')
-        if field['data_type'] == 'date' and policy.get('format') not in ('YYYYMMDD', 'YYMMDD'):
-            raise ValueError('invalid date policy')
         start, end = field['start'], field['end']
         if width is None or not 0 <= start < end <= width:
             raise ValueError('invalid field span')
@@ -131,6 +144,7 @@ def validate_mapping(batch, mapping, *, require_complete=False):
             raise ValueError('invalid filler span')
         covered |= span
     structurally_complete = width is not None and names == set(REQUIRED) and covered == set(range(width)) and not mapping['unresolved']
+    structurally_complete = structurally_complete and len(mapping['supporting_event_ids']) == len(REQUIRED)
     if mapping['mapping_status'] == 'complete' and not structurally_complete:
         raise ValueError('false complete mapping')
     if require_complete and (mapping['mapping_status'] != 'complete' or not structurally_complete):
@@ -140,8 +154,16 @@ def validate_mapping(batch, mapping, *, require_complete=False):
 def transform(batch: dict, mapping: dict) -> list[dict]:
     batch = validate_batch(batch)
     validate_mapping(batch, mapping)
+    return _transform_records(batch, mapping)
+
+
+def _transform_records(batch, mapping):
+    """Shared deterministic value path; callers separately validate product/proposal authority."""
+    from la.ingest.evidence import verify_records
+    verify_records(batch)
     outcomes = []
-    if batch['status'] == 'accepted':
+    separator = {'LF': b'\n', 'CRLF': b'\r\n'}.get(batch['framing'], b'')
+    if batch['status'] == 'accepted' and not batch.get('intake') and 'intake' not in batch['samples']:
         separator = {'LF': b'\n', 'CRLF': b'\r\n'}.get(batch['framing'])
         if separator is None:
             raise ValueError('invalid accepted framing')
@@ -167,7 +189,9 @@ def transform(batch: dict, mapping: dict) -> list[dict]:
             raise ValueError('record evidence hash mismatch')
         outcome = {'schema_version': 1, 'record_ref': ref, 'mapping_sha256': mapping['mapping_sha256'],
                    'outcome': 'converted', 'values': {}, 'reasons': [], 'evidence': {'raw_hex': record['raw_hex']}}
-        if record['disposition'] == 'quarantined' or (mapping['width'] is not None and len(raw) != mapping['width']):
+        if batch['status'] != 'accepted':
+            outcome.update(outcome='unresolved', reasons=batch['reasons'] or ['batch_refused'])
+        elif record['disposition'] == 'quarantined' or (mapping['width'] is not None and len(raw) != mapping['width']):
             outcome.update(outcome='quarantined', reasons=record['reasons'] or ['wrong_length'])
         elif mapping['mapping_status'] != 'complete':
             outcome.update(outcome='unresolved', reasons=mapping['unresolved'] or ['incomplete_mapping'])
@@ -177,6 +201,7 @@ def transform(batch: dict, mapping: dict) -> list[dict]:
                     outcome['values'][field['semantic_target']] = decode_value(raw[field['start']:field['end']], field)
             except ConversionError as exc:
                 outcome.update(outcome='quarantined', values={}, reasons=[str(exc)])
+                outcome['evidence']['failure_span'] = {'start': field['start'], 'end': field['end'], 'semantic_target': field['semantic_target']}
         outcomes.append(RowOutcome.model_validate(outcome).model_dump())
     return outcomes
 
@@ -193,6 +218,13 @@ def approve_mapping(mapping: dict, actor: str, reason: str) -> dict:
 
 
 def sql_artifacts(mapping):
+    if mapping['mapping_status'] != 'complete':
+        return '-- INCOMPLETE: DDL unavailable until all policies are resolved.\n', '-- BLOCKED: incomplete mappings cannot load.\n', []
+    names = [field['semantic_target'] for field in mapping['fields']]
+    if len(names) != len(REQUIRED) or set(names) != set(REQUIRED):
+        raise ValueError('SQL requires exactly the allowlisted semantic columns')
+    for field in mapping['fields']:
+        validate_policy(field)
     columns = ['"source_sha256" text NOT NULL', '"ordinal" bigint NOT NULL', '"raw_sha256" text NOT NULL']
     for field in sorted(mapping['fields'], key=lambda f: REQUIRED.index(f['semantic_target'])):
         name, kind, policy = field['semantic_target'], field['data_type'], field['policy']
@@ -215,7 +247,7 @@ def sql_artifacts(mapping):
     return ddl, sql, names
 
 
-def export_bundle(destination, batch: dict, mapping: dict, outcomes: list[dict], approval=None) -> dict:
+def export_bundle(destination, batch: dict, mapping: dict, outcomes: list[dict], approval=None, *, generation=None, rulings=None, brief=None, permitted_samples=None) -> dict:
     validate_mapping(batch, mapping)
     # Re-derive outcomes, rather than trust a supplied row file with forged values or identities.
     if outcomes != transform(batch, mapping):
@@ -224,33 +256,64 @@ def export_bundle(destination, batch: dict, mapping: dict, outcomes: list[dict],
         expected = approve_mapping(mapping, approval['actor'], approval['reason'])
         if approval != expected:
             raise ValueError('stale or invalid approval')
+        if generation is None or rulings is None:
+            raise ValueError('approved bundle requires generation and committed ruling events')
+    lineage = None
+    if generation is not None and rulings is not None:
+        from la.review import build_mapping, validate_event
+        events = rulings.events() if hasattr(rulings, 'events') else rulings
+        answers = {}
+        for exported in events:
+            if exported['generation_binding'] != mapping['generation_binding']:
+                continue
+            event = validate_event({k: v for k, v in exported.items() if k != 'sequence'}, generation)
+            prior = answers.get(event['question_id'])
+            if event['revision'] != (prior['revision'] + 1 if prior else 1) or event['previous_event_id'] != (prior['event_id'] if prior else None) or event['old_option_id'] != (prior['option_id'] if prior else None):
+                raise ValueError('bundle ruling chain mismatch')
+            answers[event['question_id']] = event
+        rebuilt = build_mapping(batch, generation, {'generation_binding': mapping['generation_binding'], 'answers': answers})
+        if rebuilt != mapping:
+            raise ValueError('mapping differs from committed ruling lineage')
+        lineage = {'schema_version': 1, 'generation': generation, 'events': events}
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     ddl, sql, columns = sql_artifacts(mapping)
+    from .provenance import LOAD_INSTRUCTIONS
     files = {'mapping.json': canonical(mapping) + '\n', 'source.json': canonical(batch) + '\n',
              'schema.sql': ddl, 'migrate.sql': sql,
              'rows.jsonl': ''.join(canonical(o) + '\n' for o in outcomes if o['outcome'] == 'converted'),
              'unresolved.jsonl': ''.join(canonical(o) + '\n' for o in outcomes if o['outcome'] == 'unresolved'),
              'quarantine.jsonl': ''.join(canonical(o) + '\n' for o in outcomes if o['outcome'] == 'quarantined'),
              'approval.json': canonical(approval) + '\n',
-             'LOAD.md': 'Static migration candidate; no database execution is implied.\nUse the separately authorized database-check adapter; bind values as parameters, never interpolate data.\nA fresh isolated namespace and explicit approval are required. Incomplete mappings cannot load.\n'}
+             'rulings.json': canonical(lineage) + '\n',
+             'inputs.json': canonical({'schema_version': 1, 'brief': brief, 'permitted_samples': permitted_samples}) + '\n',
+             'LOAD.md': LOAD_INSTRUCTIONS}
     hashes = {}
     for name, content in files.items():
         data = content.encode('utf-8')
         with (destination / name).open('xb') as stream:
             stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
         hashes[name] = hashlib.sha256(data).hexdigest()
     counts = {kind: sum(o['outcome'] == kind for o in outcomes) for kind in ('converted', 'unresolved', 'quarantined')}
     manifest = {'schema_version': 1, 'source_sha256': batch['source_sha256'], 'mapping_sha256': mapping['mapping_sha256'],
                 'generation_binding': mapping['generation_binding'], 'approval_sha256': approval['approval_sha256'] if approval else None,
                 'files': hashes, 'columns': columns, 'counts': counts, 'record_count': len(outcomes),
-                'mapping_status': mapping['mapping_status'], 'transformation_status': 'complete' if counts['converted'] == len(outcomes) else 'partial',
+                'mapping_status': mapping['mapping_status'], 'transformation_status': 'complete' if batch['status'] == 'accepted' and mapping['mapping_status'] == 'complete' and counts['converted'] == len(outcomes) and outcomes else 'partial',
                 'target_validation': 'not_run', 'row_parity': 'not_run'}
     manifest['config_sha256'] = batch['config_sha256']
     manifest['supporting_event_ids'] = mapping['supporting_event_ids']
-    manifest['producer_code_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    from .provenance import producer_code_pin
+    manifest['producer_code_sha256'] = producer_code_pin()
     manifest['bundle_sha256'] = digest(manifest)
     manifest = MigrationBundle.model_validate(manifest).model_dump()
     with (destination / 'manifest.json').open('x', encoding='utf-8', newline='\n') as stream:
         stream.write(canonical(manifest) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
     return manifest
+
+
+from .proposal import validate_proposal, transform_proposal
+from .bundle import verify_bundle, write_verification_receipt

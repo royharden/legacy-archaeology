@@ -4,11 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import os
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from la.contracts import AnswerEvent, MappingSpec, Question, validate_batch, validate_generation
+from la.review.policy import validate_policy
 
 REQUIRED = ('account_ref', 'description', 'balance', 'effective_date', 'status')
 
@@ -34,13 +37,13 @@ def binding(generation):
 
 
 def questions(generation: dict, limit: int = 12) -> list[dict]:
-    if not 0 <= limit <= 12:
+    if type(limit) is not int or not 0 <= limit <= 12:
         raise ValueError('question limit must be between 0 and 12')
+    dependency = binding(generation)
     result = []
     for target in REQUIRED:
         offered = [c for c in generation['candidates'] if c['semantic_target'] == target]
         # Even singleton candidates require an explicit policy selection; heuristics are not facts.
-        dependency = binding(generation)
         question_id = digest({'generation_binding': dependency, 'semantic_target': target})
         examples = [e for c in offered for e in c.get('evidence', [])][:6]
         result.append({'schema_version': 1, 'id': question_id, 'semantic_target': target,
@@ -50,7 +53,17 @@ def questions(generation: dict, limit: int = 12) -> list[dict]:
                                     'data_type': c['data_type'], 'policy': c['policy']} for c in offered]
                                   + [{'id': 'unknown'}], 'evidence': examples})
     # Consequential numeric/date interpretations precede text labels, deterministically.
-    result.sort(key=lambda q: (0 if q['semantic_target'] == 'balance' else 1 if q['semantic_target'] == 'effective_date' else 2, q['semantic_target']))
+    def priority(question):
+        options = [o for o in question['options'] if o['id'] != 'unknown']
+        metadata = generation.get('discovery', {}).get('candidate_metadata', {})
+        diagnostics = [metadata.get(option['id'], {}) for option in options]
+        boundaries = len({(o['start'], o['end']) for o in options}) > 1
+        policies = len({canonical(o['policy']) for o in options}) > 1
+        risk = 0 if boundaries else 1 if question['semantic_target'] == 'balance' else 2 if question['semantic_target'] == 'effective_date' else 3 if policies else 4
+        ranks = [d['consequence_rank'] for d in diagnostics if type(d.get('consequence_rank')) is int and d['consequence_rank'] >= 0]
+        affected = max([d['dependent_row_count'] for d in diagnostics if type(d.get('dependent_row_count')) is int and d['dependent_row_count'] >= 0] or [len({e.get('ordinal') for e in question['evidence']})])
+        return risk, min(ranks, default=3), -affected, question['semantic_target']
+    result.sort(key=priority)
     return [Question.model_validate(question).model_dump() for question in result[:limit]]
 
 
@@ -66,28 +79,95 @@ class RulingStore:
                 CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS projection (binding TEXT NOT NULL, question_id TEXT NOT NULL, revision INTEGER NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(binding,question_id));
                 CREATE TABLE IF NOT EXISTS receipts (request_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, binding TEXT NOT NULL, payload TEXT NOT NULL);
+                CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'append-only events'); END;
+                CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'append-only events'); END;
+                CREATE TRIGGER IF NOT EXISTS receipts_no_update BEFORE UPDATE ON receipts BEGIN SELECT RAISE(ABORT, 'immutable receipts'); END;
+                CREATE TRIGGER IF NOT EXISTS receipts_no_delete BEFORE DELETE ON receipts BEGIN SELECT RAISE(ABORT, 'immutable receipts'); END;
+                CREATE TRIGGER IF NOT EXISTS active_no_delete BEFORE DELETE ON active BEGIN SELECT RAISE(ABORT, 'authority epoch cannot reset'); END;
             ''')
+            # Additive migration of the existing SQLite authority, never another journal.
+            db.execute('BEGIN IMMEDIATE')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(active)')}
+            for name, definition in (('epoch', 'INTEGER NOT NULL DEFAULT 0'),
+                                     ('state_revision', 'INTEGER NOT NULL DEFAULT 0'),
+                                     ('generation', 'TEXT')):
+                if name not in columns:
+                    db.execute('ALTER TABLE active ADD COLUMN ' + name + ' ' + definition)
 
     @contextmanager
     def _connection(self):
         db = sqlite3.connect(self.path, timeout=10)
         try:
+            db.execute('PRAGMA synchronous=FULL')
             with db:
                 yield db
         finally:
             db.close()
 
-    def bind_generation(self, generation: dict) -> dict:
+    def _current_state_locked(self, db):
+        row = db.execute('SELECT binding,epoch,state_revision,generation FROM active WHERE singleton=1').fetchone()
+        head = db.execute('SELECT sequence,event_id FROM events ORDER BY sequence DESC LIMIT 1').fetchone()
+        generation, dependency, epoch, revision = None, None, 0, 0
+        status = 'unbound'
+        if row:
+            dependency, epoch, revision, serialized = row
+            if type(epoch) is not int or type(revision) is not int or epoch < 0 or revision < 0:
+                raise ValueError('invalid authority epoch/revision')
+            status = 'legacy_binding_requires_rebind'
+            if serialized is not None:
+                generation = json.loads(serialized)
+                if binding(generation) != dependency:
+                    raise ValueError('stored active generation binding mismatch')
+                status = 'bound'
+        answer_rows = db.execute('SELECT question_id,revision,event_id FROM projection WHERE binding=? ORDER BY question_id', (dependency,)).fetchall() if dependency else []
+        if generation is not None:
+            replayed = self._replay_locked(db, generation)
+            if {q: (r, e) for q, r, e in answer_rows} != {q: (e['revision'], e['event_id']) for q, e in replayed.items()}:
+                raise ValueError('authority projection differs from committed journal')
+        result = {'schema_version': 1, 'status': status, 'generation_binding': dependency,
+                  'generation_epoch': epoch, 'state_revision': revision,
+                  'journal_sequence': head[0] if head else 0, 'head_event_id': head[1] if head else None,
+                  'generation_sha256': generation['generation_sha256'] if generation else None,
+                  'source_sha256': generation['source_sha256'] if generation else None,
+                  'framing_sha256': generation['framing_sha256'] if generation else None,
+                  'brief_sha256': generation['brief_sha256'] if generation else None,
+                  'policy_sha256': generation['policy_sha256'] if generation else None,
+                  'generation': generation,
+                  'answers': {q: {'revision': r, 'event_id': e} for q, r, e in answer_rows}}
+        result['state_token'] = digest(result)
+        return result
+
+    def current_state(self) -> dict:
+        """One committed SQLite read snapshot for recovery/CAS, including an ABA epoch.
+
+        Historical answer receipts retain historical tokens. Consumers call this
+        accessor for a fresh transition token; JSON pointers are only caches.
+        """
+        with self._connection() as db:
+            db.execute('BEGIN')
+            return self._current_state_locked(db)
+
+    def bind_generation(self, generation: dict, *, expected_state_token=None) -> dict:
         dependency = binding(generation)
+        if expected_state_token is not None and (not isinstance(expected_state_token, str) or len(expected_state_token) != 64):
+            raise ValueError('expected state token must be an exact snapshot token')
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('INSERT INTO active VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET binding=excluded.binding', (dependency,))
-        return {'generation_binding': dependency}
+            before = self._current_state_locked(db)
+            if expected_state_token is not None and expected_state_token != before['state_token']:
+                raise ValueError('competing generation transition: stale state token')
+            if before['generation_binding'] != dependency or before['status'] != 'bound':
+                db.execute('INSERT INTO active(singleton,binding,epoch,state_revision,generation) VALUES(1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET binding=excluded.binding,epoch=excluded.epoch,state_revision=excluded.state_revision,generation=excluded.generation',
+                           (dependency, before['generation_epoch'] + 1, before['state_revision'] + 1, canonical(generation)))
+            result = self._current_state_locked(db)
+        return result
 
     def answer(self, generation: dict, question_id: str, option_id: str, actor: str,
                reason: str, expected_revision: int, request_id: str) -> dict:
         if not actor.strip() or not reason.strip() or not request_id.strip():
             raise ValueError('actor, reason and request_id are required')
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError('expected_revision must be a nonnegative integer')
         dependency = binding(generation)
         question = next((q for q in questions(generation) if q['id'] == question_id), None)
         if question is None or option_id not in {o['id'] for o in question['options']}:
@@ -104,11 +184,26 @@ class RulingStore:
             if prior:
                 if prior[0] != request_hash or prior[1] != dependency:
                     raise ValueError('request_id reused with different content')
-                return json.loads(prior[2])
+                receipt = json.loads(prior[2])
+                row = db.execute('SELECT sequence,payload FROM events WHERE event_id=?', (receipt['event_id'],)).fetchone()
+                if row is None or row[0] != receipt['sequence']:
+                    raise ValueError('idempotency receipt has no committed event')
+                event = validate_event(json.loads(row[1]), generation)
+                if any(event[key] != value for key, value in request.items()) or receipt['revision'] != event['revision']:
+                    raise ValueError('idempotency receipt dependency mismatch')
+                return receipt
             old = db.execute('SELECT revision,event_id,payload FROM projection WHERE binding=? AND question_id=?', (dependency, question_id)).fetchone()
+            committed = self._replay_locked(db, generation)
+            historical = committed.get(question_id)
+            if (json.loads(old[2]) if old else None) != historical:
+                raise ValueError('projection differs from committed journal; rebuild before answering')
             revision = old[0] if old else 0
             if expected_revision != revision:
                 raise ValueError(f'competing answer: expected revision {revision}')
+            asked = {event['question_id'] for (payload,) in db.execute('SELECT payload FROM events')
+                     if (event := json.loads(payload))['source_sha256'] == generation['source_sha256']}
+            if question_id not in asked and len(asked) >= 12:
+                raise ValueError('layout question budget exhausted; unresolved interpretation remains visible')
             event = dict(request, schema_version=1, revision=revision + 1,
                          previous_event_id=old[1] if old else None,
                          old_option_id=json.loads(old[2])['option_id'] if old else None,
@@ -123,6 +218,9 @@ class RulingStore:
             receipt = {'schema_version': 1, 'event_id': event['event_id'], 'sequence': cursor.lastrowid,
                        'revision': revision + 1, 'generation_binding': dependency, 'request_id': request_id}
             db.execute('INSERT INTO projection VALUES(?,?,?,?,?) ON CONFLICT(binding,question_id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,payload=excluded.payload', (dependency, question_id, revision + 1, event['event_id'], canonical(event)))
+            db.execute('UPDATE active SET state_revision=state_revision+1 WHERE singleton=1')
+            state = self._current_state_locked(db)
+            receipt.update(state_token=state['state_token'], generation_epoch=state['generation_epoch'])
             db.execute('INSERT INTO receipts VALUES(?,?,?,?)', (request_id, request_hash, dependency, canonical(receipt)))
         return receipt
 
@@ -133,29 +231,44 @@ class RulingStore:
     def projection(self, generation: dict) -> dict:
         dependency = binding(generation)
         with self._connection() as db:
+            db.execute('BEGIN')
             active = db.execute('SELECT binding FROM active WHERE singleton=1').fetchone()
             if active is None or active[0] != dependency:
                 raise ValueError('stale generation')
             answers = {q: json.loads(p) for q, p in db.execute('SELECT question_id,payload FROM projection WHERE binding=?', (dependency,))}
+            if answers != self._replay_locked(db, generation):
+                raise ValueError('projection differs from committed journal')
         return {'generation_binding': dependency, 'answers': answers}
 
-    def replay(self, generation: dict) -> dict:
-        """Rebuild a projection from the committed journal, never from JSONL."""
+    def _replay_locked(self, db, generation):
         dependency = binding(generation)
-        # Perform current-generation check even when there are no matching events.
-        self.projection(generation)
+        active = db.execute('SELECT binding FROM active WHERE singleton=1').fetchone()
+        if active is None or active[0] != dependency:
+            raise ValueError('stale generation')
         answers = {}
-        for event in self.events():
-            event = AnswerEvent.model_validate({k: v for k, v in event.items() if k != 'sequence'}).model_dump()
+        for event_id, payload in db.execute('SELECT event_id,payload FROM events ORDER BY sequence'):
+            event = json.loads(payload)
+            if event_id != event.get('event_id'):
+                raise ValueError('journal identity mismatch')
             if event['generation_binding'] != dependency:
                 continue
-            content = {k: v for k, v in event.items() if k not in ('event_id', 'sequence')}
-            if digest(content) != event['event_id']:
-                raise ValueError('journal event hash mismatch')
+            event = validate_event(event, generation)
             old = answers.get(event['question_id'])
-            if event['revision'] != (old['revision'] + 1 if old else 1) or event['previous_event_id'] != (old['event_id'] if old else None):
+            if event['revision'] != (old['revision'] + 1 if old else 1) or event['previous_event_id'] != (old['event_id'] if old else None) or event['old_option_id'] != (old['option_id'] if old else None):
                 raise ValueError('journal revision chain mismatch')
-            answers[event['question_id']] = {k: v for k, v in event.items() if k != 'sequence'}
+            answers[event['question_id']] = event
+        return answers
+
+    def replay(self, generation: dict, *, rebuild=False) -> dict:
+        """Read or atomically rebuild projections in one current-generation snapshot."""
+        dependency = binding(generation)
+        with self._connection() as db:
+            db.execute('BEGIN IMMEDIATE' if rebuild else 'BEGIN')
+            answers = self._replay_locked(db, generation)
+            if rebuild:
+                db.execute('DELETE FROM projection WHERE binding=?', (dependency,))
+                for question_id, event in answers.items():
+                    db.execute('INSERT INTO projection VALUES(?,?,?,?,?)', (dependency, question_id, event['revision'], event['event_id'], canonical(event)))
         return {'generation_binding': dependency, 'answers': answers}
 
     def export(self, destination) -> dict:
@@ -163,14 +276,42 @@ class RulingStore:
         data = ''.join(canonical(event) + '\n' for event in events).encode('utf-8')
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        # Exclusive create protects prior projections; callers choose a fresh path after a crash.
-        with destination.open('xb') as stream:
-            stream.write(data)
+        temporary = destination.with_name(destination.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            with temporary.open('xb') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Atomic exclusive publication: a crash cannot expose a partial final JSONL.
+            os.link(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return {'events': len(events), 'sha256': hashlib.sha256(data).hexdigest(), 'path': str(destination)}
+
+
+def validate_event(event, generation):
+    event = AnswerEvent.model_validate(event).model_dump()
+    if digest({k: v for k, v in event.items() if k != 'event_id'}) != event['event_id']:
+        raise ValueError('journal event hash mismatch')
+    if event['generation_binding'] != binding(generation):
+        raise ValueError('event generation mismatch')
+    for key in ('source_sha256', 'generation_sha256', 'brief_sha256', 'policy_sha256'):
+        if event[key] != generation[key]:
+            raise ValueError('event dependency mismatch')
+    question = next((q for q in questions(generation) if q['id'] == event['question_id']), None)
+    if question is None or event['semantic_target'] != question['semantic_target'] or event['option_id'] not in {o['id'] for o in question['options']}:
+        raise ValueError('event does not select an offered interpretation')
+    if event['revision'] != event['expected_revision'] + 1 or event['revision'] < 1 or not event['actor'].strip() or not event['reason'].strip():
+        raise ValueError('invalid event revision/provenance')
+    if not event['request_id'].strip():
+        raise ValueError('event request identity required')
+    return event
 
 
 def build_mapping(batch: dict, generation: dict, rulings) -> dict:
     batch = validate_batch(batch)
+    from la.ingest.evidence import resolve_evidence, verify_records
+    verify_records(batch)
     projection = rulings.projection(generation) if isinstance(rulings, RulingStore) else rulings
     dependency = binding(generation)
     if projection.get('generation_binding') != dependency:
@@ -181,19 +322,33 @@ def build_mapping(batch: dict, generation: dict, rulings) -> dict:
     fields, event_ids, unresolved = [], [], []
     for q in questions(generation):
         event = projection.get('answers', {}).get(q['id'])
+        if event is not None:
+            event = validate_event(event, generation)
+            if event['question_id'] != q['id']:
+                raise ValueError('supporting event question mismatch')
         candidate = next((c for c in generation['candidates'] if event and c['id'] == event['option_id'] and c['semantic_target'] == q['semantic_target']), None)
         if event is None or event.get('generation_binding') != dependency or candidate is None:
             unresolved.append(f"unresolved:{q['semantic_target']}")
             continue
         fields.append(candidate)
         event_ids.append(event['event_id'])
+        if not candidate['evidence']:
+            unresolved.append(f'missing_permitted_evidence:{q["semantic_target"]}')
+        for evidence in candidate['evidence']:
+            resolve_evidence(batch, evidence, require_authorized=True)
     covered = set()
     width = batch['width']
+    if width is not None and (type(width) is not int or not 1 <= width <= 256):
+        raise ValueError('invalid record width')
     for field in fields:
         start, end = field['start'], field['end']
         target = field['semantic_target']
         kind = 'decimal' if target == 'balance' else 'date' if target == 'effective_date' else 'text'
         policy = field['policy']
+        try:
+            validate_policy(field)
+        except ValueError:
+            unresolved.append(f'unresolved_policy:{target}')
         if field['data_type'] != kind or not {'padding_byte', 'padding_side', 'trim', 'nullable'} <= policy.keys():
             unresolved.append(f'unresolved_policy:{target}')
         if kind == 'decimal' and not {'scale', 'precision', 'sign'} <= policy.keys():
@@ -207,6 +362,17 @@ def build_mapping(batch: dict, generation: dict, rulings) -> dict:
             unresolved.append('overlapping_fields')
         covered |= span
     filler = generation.get('filler', [])
+    if filler:
+        declaration = generation.get('discovery', {}).get('filler_declaration')
+        if not isinstance(declaration, dict) or declaration.get('kind') != 'explicit_filler_declaration' or declaration.get('spans') != filler or not declaration.get('actor', '').strip() or not declaration.get('reason', '').strip():
+            raise ValueError('filler requires explicit content-bound actor declaration')
+        if digest({k: v for k, v in declaration.items() if k != 'declaration_sha256'}) != declaration.get('declaration_sha256'):
+            raise ValueError('filler declaration hash mismatch')
+        for key in ('source_sha256', 'framing_sha256', 'brief_sha256'):
+            if declaration.get(key) != batch[key]:
+                raise ValueError('filler declaration dependency mismatch')
+        for evidence in declaration.get('evidence', []):
+            resolve_evidence(batch, evidence, require_authorized=True)
     for item in filler:
         start, end = item['start'], item['end']
         span = set(range(start, end))
