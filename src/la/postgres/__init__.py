@@ -8,6 +8,7 @@ import uuid
 from decimal import Decimal
 from pathlib import Path
 
+from la.contracts import MigrationBundle
 from la.convert import approve_mapping, sql_artifacts, transform, validate_mapping
 from la.review import canonical, digest
 
@@ -17,6 +18,7 @@ def validate_bundle(bundle_path):
     if not root.is_dir():
         raise ValueError('bundle must be a directory')
     manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
+    manifest = MigrationBundle.model_validate(manifest).model_dump()
     if digest({k: v for k, v in manifest.items() if k != 'bundle_sha256'}) != manifest['bundle_sha256']:
         raise ValueError('bundle hash mismatch')
     expected_files = {'mapping.json', 'source.json', 'schema.sql', 'migrate.sql', 'rows.jsonl', 'unresolved.jsonl', 'quarantine.jsonl', 'approval.json', 'LOAD.md'}

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from la.contracts import MappingSpec, Question, validate_batch, validate_generation
+from la.contracts import AnswerEvent, MappingSpec, Question, validate_batch, validate_generation
 
 REQUIRED = ('account_ref', 'description', 'balance', 'effective_date', 'status')
 
@@ -118,6 +118,7 @@ class RulingStore:
                          brief_sha256=generation['brief_sha256'], policy_sha256=generation['policy_sha256'],
                          timestamp=datetime.now(timezone.utc).isoformat())
             event['event_id'] = digest(event)
+            event = AnswerEvent.model_validate(event).model_dump()
             cursor = db.execute('INSERT INTO events(event_id,payload) VALUES(?,?)', (event['event_id'], canonical(event)))
             receipt = {'schema_version': 1, 'event_id': event['event_id'], 'sequence': cursor.lastrowid,
                        'revision': revision + 1, 'generation_binding': dependency, 'request_id': request_id}
@@ -145,6 +146,7 @@ class RulingStore:
         self.projection(generation)
         answers = {}
         for event in self.events():
+            event = AnswerEvent.model_validate({k: v for k, v in event.items() if k != 'sequence'}).model_dump()
             if event['generation_binding'] != dependency:
                 continue
             content = {k: v for k, v in event.items() if k not in ('event_id', 'sequence')}

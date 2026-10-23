@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal, localcontext
 from pathlib import Path
 
-from la.contracts import Approval, MappingSpec, RowOutcome, validate_batch
+from la.contracts import Approval, MappingSpec, MigrationBundle, RowOutcome, validate_batch
 from la.review import REQUIRED, canonical, digest
 
 
@@ -250,6 +250,7 @@ def export_bundle(destination, batch: dict, mapping: dict, outcomes: list[dict],
     manifest['supporting_event_ids'] = mapping['supporting_event_ids']
     manifest['producer_code_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     manifest['bundle_sha256'] = digest(manifest)
+    manifest = MigrationBundle.model_validate(manifest).model_dump()
     with (destination / 'manifest.json').open('x', encoding='utf-8', newline='\n') as stream:
         stream.write(canonical(manifest) + '\n')
     return manifest
