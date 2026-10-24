@@ -38,3 +38,5 @@ Ready future evaluator caller factories and non-secret configuration shapes are 
 [Shared wire contracts](docs/CONTRACTS.md) name the actual owner validators and closed nested forms. Supplied-only serialization preserves legacy absent-field hashes; vendor usage remains raw and unsupported costs stay unknown. This repository is source constructed in Dirty Mode; tests, demo, providers, database effects, custody, parity and benchmark remain unexecuted/unverified here.
 
 [Capture/replay operator source](docs/CAPTURE-REPLAY.md) adds explicitly pinned experiment collection, offline inspection, read-only reconciliation and exact later-record selection. The same guide distinguishes public/retired replay from active hidden signed projections. No test/demo/provider/DB/custody/parity/benchmark operation was executed here; all runtime claims remain unverified.
+
+Disposable namespace cleanup is a separate explicit operator command: see docs/CLEANUP.md (`scripts/cleanup.py`, inactive example `config/cleanup-grant.example.json`). Never run automatically after evaluation.

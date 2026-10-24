@@ -170,3 +170,5 @@ The public prepare-target packet additionally accepts evaluation_phase and evalu
 [Shared wire contracts](CONTRACTS.md) document the canonical base, actual closed nested owner aliases and supplied-only serialization. Unknown protocol fields reject before prompting/approval; raw vendor usage stays bounded opaque data and unsupported billing remains unknown. Old artifacts are immutable; new public hand mappings use the documented explicit discovery form before hashing.
 
 [Capture and replay adapters](CAPTURE-REPLAY.md) document actual D5 experiment collect/open/reconcile, explicit later recovery selection and pinned target-port callbacks. All inspection/selection is read-only and chooses exact external pins; new collection/reconciliation requires separately signed operations and current code authority. No automatic cleanup or archive publication exists. Future commands remain unexecuted.
+
+`scripts/cleanup.py plan|run|reconcile|inspect` — owned-namespace cleanup with a separately signed cleanup authority; details and states in docs/CLEANUP.md.

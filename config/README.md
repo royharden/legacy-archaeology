@@ -78,3 +78,5 @@ commands with independently supplied signed product-bundle authority/config and
 external bundle pin. Product approval is never fabricated by evaluator proposals.
 
 The inactive experiment-grants.example.json adds an exact experiment reference to the target grant index. Remove both later-recovery keys to use original captured effects. Otherwise supply the explicit selected later record SHA and exact original prior SHA (JSON null only for actually absent prior). These callbacks read pinned immutable captures without a DSN or new target action. See docs/CAPTURE-REPLAY.md for the separate collect/open/reconcile/select-recovery commands; placeholders grant nothing and deliberately fail validation.
+
+`cleanup-grant.example.json` — inactive (`active: false`) closed cleanup grant; every pin must be replaced and a separately signed `disposable_target_cleanup_authority` supplied (see docs/CLEANUP.md). Load/probe authority never grants cleanup.
