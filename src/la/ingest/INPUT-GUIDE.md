@@ -73,6 +73,42 @@ includes its final LF. The three domains differ; [IDENTITY.md](IDENTITY.md)
 defines the canonical encoding. Static pins.json files make these distinctions
 explicit without claiming the app validated them.
 
+## 2a. Or prepare the artifact from an explicit selection
+
+`la.ingest.sample_prep.prepare_permitted_samples(batch, selections, authorization)`
+(CLI: `la prepare-samples RUN --selections FILE --authorization LABEL`) builds the
+same artifact from an already retained, materialized batch. It reuses the batch's
+retained records, the existing artifact validator and the intake authorizer; it
+does not frame bytes again. It refuses batches with framing/declaration refusals,
+unmaterialized records or no current intake metadata (older runs: ingest again).
+A batch refused only for `sample_*` reasons has valid framing and is accepted
+here, since a corrected artifact is how that run is replaced. To get a first run, ingest with a zero-grant artifact
+(`"records": []` and a label saying no samples are granted). That run has no
+permitted bytes until you prepare an artifact and ingest again.
+
+You write every selection yourself:
+
+| Selection | Grants | Emitted entry |
+|---|---|---|
+| `{"ordinal": 2}` | whole record 2 | `record_ref` + span `[0,length)` + full record raw_hex/hash |
+| `{"ordinal": 2, "start": 4, "end": 8}` | bytes 4–7 of record 2 only | `record_ref` (whole-record hash) + span + slice raw_hex/hash |
+| add `"record_raw_sha256": "..."` | nothing extra | refuses if the retained record's bytes differ |
+
+Offsets are exact JSON integers (no booleans, strings or floats), record-relative
+and half-open. Unknown keys, a lone start or end, empty or out-of-range spans,
+duplicate or overlapping spans in one record, an empty list, a blank label, more
+than 64 distinct records or more than 16384 selected bytes are refused. Adjacent
+spans are allowed and stay separate. Order is preserved. Nothing is defaulted,
+merged, widened to neighbors or separators, or inferred. A span covering the whole
+record counts as a whole-record grant. Blank records cannot be sampled.
+
+The helper emits only the current nested form. Hand-authored legacy flat entries
+remain accepted by ingest. The receipt keeps the three hash domains apart:
+`content_sha256` is the self-hash, `object_sha256` is the value a later batch
+records as `samples.artifact_sha256`, and `file_sha256` is the hash of the
+published file, which includes the final LF. The receipt also states
+`provider_permission: not_established_by_label`.
+
 ## 3. Know what bounded selection does
 
 Intake selects authorized entries deterministically by ordinal/start/end, with
