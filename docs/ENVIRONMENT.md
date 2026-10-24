@@ -2,6 +2,8 @@
 
 Use Python 3.12.13 and uv 0.11.19. `uv.lock` records exact resolved versions,
 artifact hashes, and optional dependencies. The build backend is pinned too.
+`.gitattributes` disables text conversion for `.dat` inputs so checkout preserves
+their byte hashes and declared LF/CRLF framing even with `core.autocrlf=true`.
 Each checkout owns its interpreter under `.venv/toolchain` and environment under
 `.venv/runtime`; do not share a writable environment between lanes.
 
