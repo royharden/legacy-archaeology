@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from la.contracts import canonical, digest, sha256
-from .live import generate_once
+from .live import generate_once, validate_config
 from .prompts import validate_ranking
 
 
@@ -31,6 +31,34 @@ def provider_port(*, config, ledger_path, run,trusted_authority=None):
         phase=trusted_authority.get('evaluation_phase','T1')
         if phase not in ('T1','T3'):
             raise ValueError('trusted authority names an unknown evaluation phase')
+
+    def preflight_text(envelope):
+        """Pure exact-text preflight, callable before evaluator reservation.
+
+        Meter-added phase/model pins are checked by request() after reservation.
+        This capability checks transport size without opening a ledger, reading
+        credentials or invoking any transport. Gateway prompt hashes still bind
+        the unwrapped prompt; provider receipts bind the returned wrapped text.
+        """
+        mode, method = envelope.get('mode'), envelope.get('method')
+        if method not in ('B1', 'C0', 'R0', 'R1') or mode not in ('rules', 'mock', 'live'):
+            raise ValueError('unknown evaluator method/mode')
+        prompt = envelope.get('prompt')
+        if type(prompt) is not dict or digest(prompt) != envelope.get('prompt_sha256'):
+            raise ValueError('gateway prompt content mismatch')
+        if mode != 'live':
+            return canonical(prompt).decode()
+        billing = validate_config(config)
+        limit = min(8000, billing['max_input_tokens'])
+        if trusted_authority is not None:
+            cap = trusted_authority['caps']['max_input_tokens']
+            if type(cap) is not int or not 1 <= cap <= 8000:
+                raise ValueError('invalid trusted input token cap')
+            limit = min(limit, cap)
+        text = provider_text(method, prompt)
+        if not 0 < len(text.encode('utf-8')) <= limit:
+            raise ValueError('conservative wrapped UTF-8 byte/token request bound exceeded')
+        return text
 
     def request(envelope):
         allowed = {'mode', 'method', 'attempt', 'prompt', 'prompt_sha256', 'max_input_tokens',
@@ -83,7 +111,7 @@ def provider_port(*, config, ledger_path, run,trusted_authority=None):
                         provider='offline-simulation', model=None, price_sha256=None, mode=mode)
         if config is None:
             raise ValueError('live evaluator requires verified explicit config')
-        text = provider_text(method, prompt)
+        text = preflight_text(envelope)
         namespace=(run if trusted_authority is None else phase+':'+digest(dict(
             authority_sha256=trusted_authority['authority_sha256'],attempt_id=trusted_authority['attempt_id'],run=run)))
         result = generate_once(text, config, ledger_path,
@@ -105,4 +133,5 @@ def provider_port(*, config, ledger_path, run,trusted_authority=None):
         return dict(output=output, usage=call['raw_usage'], cost_status='known' if call['cost_known'] else 'unknown',
                     known_cost=call['cost_usd'], provider=call['provider'], model=call['model'],
                     price_sha256=call['price_evidence_sha256'], provider_receipt=call, raw_text=result['text'])
+    request.preflight = preflight_text
     return request
