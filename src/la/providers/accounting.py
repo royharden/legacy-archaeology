@@ -123,6 +123,8 @@ class CallLedger:
         cost = amount(cost) if known else None
         if status == 'unknown_liability' and known or status != 'unknown_liability' and not known:
             raise ValueError('inconsistent settlement cost state')
+        if status == 'not_sent' and cost != 0:
+            raise ValueError('a never-sent request must have known zero cost')
         receipt = dict(reservation, **fields, status=status, cost_known=known,
                        cost_usd=str(cost) if known else None, completed_at=now())
         receipt['receipt_sha256'] = digest(receipt)
@@ -143,8 +145,10 @@ class CallLedger:
         """Atomically prove-and-fence one evaluator call as never sent (T3-LIVE-API A1.1).
 
         generate_once reserves here before any transport. In one BEGIN IMMEDIATE:
-        if no provider attempt carries these five pins, write a zero-cost 'fenced'
-        tombstone that reserve() then refuses forever; otherwise write nothing.
+        if no possibly-sent provider attempt carries these five pins, write a
+        zero-cost 'fenced' tombstone that reserve() then refuses forever. Settled
+        never-sent attempts remain in accounting history and request counts but
+        do not prevent the fence; unresolved or possibly-billed attempts do.
         Exact retry with the same fence_id returns the existing fence. The result
         pins this ledger's path so another (e.g. fresh, empty) ledger cannot stand in.
         """
@@ -166,6 +170,10 @@ class CallLedger:
                     continue
                 if status == 'fenced' and value.get('fence_id') == fence_id:
                     existing = value
+                    continue
+                if (status == 'not_sent' and value.get('status') == 'not_sent'
+                        and value.get('cost_known') is True
+                        and amount(value.get('cost_usd')) == 0):
                     continue
                 attempts.append(value)
                 if len(attempts) > 1000: raise ValueError('attestation match bound exceeded')
