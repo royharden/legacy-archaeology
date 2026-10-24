@@ -20,6 +20,27 @@ from .eligibility import (ReceiptVerifier, closed, text, validate_commitment,
 TERMINAL = {'completed', 'partial', 'failed', 'cancelled', 'no_output'}
 
 
+def _protected_live(required=True):
+    """Lazy D6 T3 module; when absent every t3_* event fails closed."""
+    # import_module (unlike `from . import x`) raises ModuleNotFoundError naming the
+    # submodule itself, so only its own absence is tolerated; inner import errors propagate.
+    import importlib
+    name = __package__ + '.protected_live'
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if exc.name != name:
+            raise
+        if required:
+            raise ValueError('protected T3 live module unavailable; t3 events refused') from None
+        return None
+
+
+def _live_attempt(kind, payload):
+    return (kind == 'attempt_started' and isinstance(payload, dict) and isinstance(payload.get('suite'), dict)
+            and payload['suite'].get('mode') == 'live')
+
+
 @dataclass(frozen=True)
 class JournalReceipt:
     event: dict
@@ -79,13 +100,24 @@ class EditionRegistry:
         events = self.events()
         return events[-1]['event_sha256'] if events else None
 
+    def snapshot(self) -> dict:
+        """One committed read; callers binding head and folded state use this together."""
+        events = self.events()
+        return {'events': events, 'head': events[-1]['event_sha256'] if events else None}
+
     @staticmethod
     def _state(events: list[dict], edition: str) -> dict:
-        state = {'commitment': None, 'freeze': None, 'exposed': False, 'retired': False, 'attempt': None, 't1': None}
+        state = {'commitment': None, 'freeze': None, 'exposed': False, 'retired': False, 'attempt': None, 't1': None,
+                 't3': None}
         for event in events:
             if event['edition'] != edition:
                 continue
             kind, payload = event['event_type'], event['payload']
+            # Every edition event passes the T3 fold first (live attempt_started needs
+            # an admitted scope). Without the module only t3_*/live attempts refuse.
+            protected = _protected_live(required=kind.startswith('t3_') or _live_attempt(kind, payload))
+            if protected is not None and protected.fold_protected_event(state, event):
+                continue
             if kind.startswith('t1_') or state['t1'] is not None:
                 from .public_live import fold_public_event
                 if fold_public_event(state, event):
@@ -217,6 +249,13 @@ class EditionRegistry:
                     self.check_t1_chronology(public['catalog'], events=events)
                 if kind in ('t1_attempt_started', 't1_request_reserved'):
                     self.assert_no_unknown_public_liability(events=events)
+                    # A shared journal may hold t3_* events from another checkout: then the
+                    # module is required; otherwise no T3 liability can exist to check.
+                    protected = _protected_live(required=any(e['event_type'].startswith('t3_') for e in events))
+                    if protected is not None:
+                        protected.assert_no_unknown_live_liability(events)
+                if kind in ('t3_scope_admitted', 't3_request_reserved') or _live_attempt(kind, payload):
+                    _protected_live().assert_no_unknown_live_liability(events)
                 if kind == 'frozen':
                     self.check_freeze_chronology(payload, events)
                 self._state(events + [event], edition)  # Reject illegal state before durable mutation.
