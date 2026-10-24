@@ -190,4 +190,54 @@ class PublicLiveAuthority(unittest.TestCase):
             with self.assertRaises(ValueError): context.validate()
 
 
+class PublicUnsentVoid(unittest.TestCase):
+    """Seam Amendment A1/A1.1 voids; attestation mirrors D7 CallLedger.fence_unsent (synthetic)."""
+
+    def reserve_unsent(self, directory):
+        context, candidate = public_context(directory)
+        context.begin(request_id='begin', expected_head=context.registry.head)
+        context.claim_arm(candidate.variant_id, 'B1')
+        request = {'attempt': 1, 'prompt_sha256': digest('synthetic T1 gateway prompt')}
+        call_id = context.meter(candidate, 'B1').reserve(request, 50)  # crash before transport
+        return context, candidate, call_id
+
+    def void(self, context, candidate, call_id, *, attempts=()):
+        a = context.validate()
+        query = {'evaluation_phase': 'T1', 'evaluation_authority_sha256': a['authority_sha256'],
+                 'gateway_prompt_sha256': digest('synthetic T1 gateway prompt'),
+                 'source_sha256': candidate.visible['source_sha256'], 'evaluator_method': 'B1'}
+        fenced = not attempts  # D7 fence_unsent writes a tombstone only when nothing matched
+        fence = ({'schema_version': 1, 'kind': 'unsent_fence', 'fence_id': call_id, **query, 'cost_known': True,
+                  'cost_usd': '0', 'fenced_at': '2026-01-01T00:00:00Z'} if fenced else None)
+        capture = {'schema_version': 1, 'kind': 'call_ledger_attestation', 'ledger_path_sha256': digest('synthetic ledger'),
+                   'query': query, 'attempts': list(attempts), 'fenced': fenced, 'fence': fence,
+                   'observed_at': '2026-01-01T00:00:00Z'}
+        capture['attestation_sha256'] = digest(capture)
+        ref = context.registry.store.put('call_ledger_attestation', capture)
+        signed = sign({'schema_version': 1, 'action': 'void_unsent_live_reservation', 'phase': 'T1',
+                       'edition': candidate.edition, 'attempt_id': a['attempt_id'], 'call_id': call_id,
+                       'authority_sha256': a['authority_sha256'], 'ledger_path_sha256': digest('synthetic ledger'),
+                       'ledger_capture': ref})
+        return context.void_unsent_reservation(signed, request_id='void')
+
+    def test_void_releases_cross_edition_liability_but_never_completes_b1(self):
+        """what_bug_this_catches: an unsent reservation blocks all live trials, or a void fakes a B1 success."""
+        with TemporaryDirectory() as directory:
+            context, candidate, call_id = self.reserve_unsent(directory)
+            with self.assertRaises(ValueError): context.registry.assert_no_unknown_public_liability()
+            self.void(context, candidate, call_id)
+            context.registry.assert_no_unknown_public_liability()
+            call = context.registry.state(candidate.edition)['t1']['attempts'][context.suite['attempt_id']]['calls'][call_id]
+            self.assertEqual((call['status'], call['known_cost'], call['voided']), ('known', '0', True))
+            capture = context.registry.store.put('arm_receipt', {'synthetic_unit_record': True})
+            with self.assertRaises(ValueError):
+                context.finish_arm(candidate.variant_id, 'B1', 'completed', capture)
+
+    def test_ledger_attempt_refuses_void(self):
+        """what_bug_this_catches: a request that reached the provider ledger is voided to zero cost."""
+        with TemporaryDirectory() as directory:
+            context, candidate, call_id = self.reserve_unsent(directory)
+            with self.assertRaises(ValueError):
+                self.void(context, candidate, call_id, attempts=[{'status': 'unknown_liability'}])
+
 if __name__ == '__main__': unittest.main()

@@ -125,6 +125,60 @@ def validate_authority(payload, catalog, *, check_time=True):
     return value
 
 
+VOID_KEYS = {'schema_version', 'action', 'phase', 'edition', 'attempt_id', 'call_id', 'authority_sha256',
+             'ledger_path_sha256', 'ledger_capture'}
+ATTESTATION_KEYS = {'schema_version', 'kind', 'ledger_path_sha256', 'query', 'attempts', 'fenced', 'fence',
+                    'observed_at', 'attestation_sha256'}
+FENCE_KEYS = {'schema_version', 'kind', 'fence_id', 'evaluation_phase', 'evaluation_authority_sha256',
+              'gateway_prompt_sha256', 'source_sha256', 'evaluator_method', 'cost_known', 'cost_usd', 'fenced_at'}
+
+
+def voidable(call):
+    """Still reserved, or settled unknown with no reply/billing receipt (D7 refused before transport)."""
+    return call is not None and (call['status'] == 'reserved' or (call['status'] == 'unknown'
+        and call.get('billing_receipt') is None and call.get('reply_sha256') in (None, digest(None))))
+
+
+def validate_void(payload, *, phase, edition, attempt_id, authority_sha256, call, store):
+    """Signed void of a still-reserved live call that D7's ledger proves was never sent.
+
+    D7 generate_once writes its own reservation before transport. The attestation is
+    an atomic D7 fence (seam A1.1): it found no attempt with the call's exact pins and,
+    in the same transaction, wrote a tombstone that makes any later D7 reservation
+    with those pins refuse. So the call can never reach transport after the void.
+    The fence proves no D7 attempt ever existed, so a call settled 'unknown' without any
+    reply or billing receipt (D7 refused at reserve) is also voidable; any call with a
+    reply/receipt, or any ledger match, must be reconciled, never voided.
+    """
+    receipt = closed(payload, VOID_KEYS, 'signed void of unsent reservation')
+    if (receipt['action'] != 'void_unsent_live_reservation' or receipt['phase'] != phase
+            or receipt['edition'] != edition or receipt['attempt_id'] != attempt_id
+            or receipt['authority_sha256'] != authority_sha256):
+        raise ValueError('void authority names another phase/edition/attempt/authority')
+    hashes(receipt, ('call_id', 'authority_sha256', 'ledger_path_sha256'))
+    if not voidable(call) or call['call_id'] != receipt['call_id']:
+        raise ValueError('only a reserved, or reply-less unknown, never-sent live call can be voided')
+    capture = closed(store.get(receipt['ledger_capture'], kind='call_ledger_attestation'), ATTESTATION_KEYS,
+                     'call ledger attestation')
+    if (capture['kind'] != 'call_ledger_attestation' or capture['ledger_path_sha256'] != receipt['ledger_path_sha256']
+            or capture['attestation_sha256'] != digest({k: v for k, v in capture.items() if k != 'attestation_sha256'})):
+        raise ValueError('ledger attestation differs from the signed void or its own hash')
+    expected = {'evaluation_phase': phase, 'evaluation_authority_sha256': authority_sha256,
+                'gateway_prompt_sha256': call['prompt_sha256'], 'source_sha256': call['source_sha256'],
+                'evaluator_method': call['method']}
+    if capture['query'] != expected:
+        raise ValueError('ledger attestation queried another call')
+    if capture['attempts'] != [] or capture['fenced'] is not True:
+        raise ValueError('ledger shows a provider attempt or wrote no fence; reconcile instead of void')
+    fence = closed(capture['fence'], FENCE_KEYS, 'ledger unsent fence')
+    if (fence['kind'] != 'unsent_fence' or fence['fence_id'] != call['call_id']
+            or any(fence[key] != value for key, value in expected.items())
+            or fence['cost_known'] is not True or fence['cost_usd'] != '0'):
+        raise ValueError('ledger fence does not bind this exact call')
+    text(capture['observed_at'], 'ledger observation time'); text(fence['fenced_at'], 'fence time')
+    return receipt
+
+
 def fold_public_event(state, event):
     """Pure state fold inside the same EditionRegistry transaction/chain."""
     kind, value = event['event_type'], event['payload']
@@ -179,6 +233,15 @@ def fold_public_event(state, event):
         attempt['calls'][value['call_id']].update(status='known', known_cost=value['known_cost'], usage=value['usage'],
                                                  billing_capture=value['billing_capture'])
         return True
+    if kind == 't1_request_voided':
+        closed(value, {'attempt_id', 'call_id', 'void_authority_sha256', 'ledger_capture'}, 'T1 void')
+        if attempt is None or not voidable(attempt['calls'].get(value['call_id'])):
+            raise ValueError('no voidable T1 call')
+        hashes(value, ('void_authority_sha256',))
+        # Never sent: zero liability, still counted against request caps, never a B1 success.
+        attempt['calls'][value['call_id']].update(status='known', known_cost='0', usage=None, voided=True,
+                                                 ledger_capture=value['ledger_capture'])
+        return True
     if attempt is None or attempt['status'] != 'running':
         raise ValueError('no active exact T1 attempt')
     caps = attempt['authority']['caps']
@@ -196,7 +259,8 @@ def fold_public_event(state, event):
                     'completed', 'partial', 'failed', 'abstained'):
                 raise ValueError('invalid T1 arm finish')
             if value['method'] == 'B1' and value['status'] == 'completed':
-                calls = [call for call in attempt['calls'].values() if call['variant_id'] == value['variant_id'] and call['method'] == 'B1']
+                calls = [call for call in attempt['calls'].values() if call['variant_id'] == value['variant_id']
+                         and call['method'] == 'B1' and not call.get('voided')]
                 if len(calls) != 1 or calls[0]['status'] != 'known':
                     raise ValueError('complete T1 B1 needs exactly one accounted request, never repair/no-output')
             attempt['arms'][arm_id] = {'status': value['status'], 'capture': value['capture']}
@@ -448,6 +512,21 @@ class PublicLiveContext:
         return self.registry._append(self.catalog['edition'], 't1_liability_reconciled',
             {'attempt_id': a['attempt_id'], 'call_id': receipt['call_id'], 'known_cost': bill['billed_usd'],
              'usage': bill['usage'], 'billing_capture': receipt['billing_capture'], 'authority_sha256': digest(signed_receipt)},
+            request_id=request_id, expected_head=self.registry.head)
+
+    def void_unsent_reservation(self, signed_receipt, *, request_id):
+        """Clear a still-reserved T1 call proven never sent (crash before transport)."""
+        a = self.validate(check_time=False, check_chronology=False)
+        payload = self.verifier.verify(signed_receipt, 'run_owner')
+        attempt = self.registry.state(self.catalog['edition'])['t1']['attempts'].get(a['attempt_id'])
+        call_id = payload.get('call_id') if isinstance(payload, dict) else None
+        call = attempt['calls'].get(call_id) if attempt is not None and isinstance(call_id, str) else None
+        receipt = validate_void(payload, phase='T1',
+                                edition=self.catalog['edition'], attempt_id=a['attempt_id'],
+                                authority_sha256=a['authority_sha256'], call=call, store=self.registry.store)
+        return self.registry._append(self.catalog['edition'], 't1_request_voided',
+            {'attempt_id': a['attempt_id'], 'call_id': receipt['call_id'],
+             'void_authority_sha256': digest(signed_receipt), 'ledger_capture': receipt['ledger_capture']},
             request_id=request_id, expected_head=self.registry.head)
 
     def select_configuration(self, signed_receipt, *, request_id):
