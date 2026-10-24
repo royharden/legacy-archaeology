@@ -128,6 +128,37 @@ class CallLedger:
             self.event(db, reservation['attempt_id'], dict(kind='settlement', receipt=receipt))
         return receipt
 
+    def attempts_matching(self, *, evaluation_phase, evaluation_authority_sha256,
+                          gateway_prompt_sha256, source_sha256, evaluator_method) -> dict:
+        """Read-only attestation of provider attempts for one evaluator call (T3-LIVE-API A1).
+
+        generate_once reserves here before any transport, so an empty list proves
+        the call was never sent from THIS ledger. Writes nothing; the attestation
+        pins the ledger path so a different (e.g. fresh, empty) ledger cannot
+        stand in for the one the run actually used.
+        """
+        from la.contracts.protocol import identity
+        if evaluation_phase not in ('T1', 'T3') or evaluator_method not in ('B1', 'C0', 'R0', 'R1'):
+            raise ValueError('explicit T1/T3 phase and evaluator method required')
+        query = dict(evaluation_phase=evaluation_phase, evaluation_authority_sha256=evaluation_authority_sha256,
+                     gateway_prompt_sha256=gateway_prompt_sha256, source_sha256=source_sha256,
+                     evaluator_method=evaluator_method)
+        for key in ('evaluation_authority_sha256', 'gateway_prompt_sha256', 'source_sha256'):
+            identity(query[key])
+        attempts = []
+        with self.connection() as db:
+            db.execute('BEGIN')
+            for (payload,) in db.execute('SELECT payload FROM provider_attempts ORDER BY id'):
+                value = json.loads(payload)
+                if all(value.get(key) == item for key, item in query.items()):
+                    attempts.append(value)
+                    if len(attempts) > 1000: raise ValueError('attestation match bound exceeded')
+        result = {'schema_version': 1, 'kind': 'call_ledger_attestation',
+                  'ledger_path_sha256': digest(str(self.path.resolve())), 'query': query,
+                  'attempts': attempts, 'observed_at': now()}
+        result['attestation_sha256'] = digest(result)
+        return result
+
     def reconcile(self, attempt_id, *, actual_cost_usd, authority, evidence_sha256, expected_receipt_sha256):
         """Explicit operator billing reconciliation; never resets request counts."""
         from la.contracts.protocol import integer,text,identity
