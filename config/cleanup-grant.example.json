@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "disposable_cleanup_grant",
+  "active": false,
+  "artifact": "operator/target-artifact.json",
+  "original_signed_authority": "operator/signed-target-authority.json",
+  "cleanup_signed_authority": "operator/signed-cleanup-authority.json",
+  "target_config": "operator/disposable-target-config.json",
+  "experiment": "target-captures/EXACT_EXPERIMENT_ID",
+  "expected_experiment_sha256": "REPLACE_WITH_EXTERNAL_EXPERIMENT_SHA256",
+  "expected_original_observation_sha256": "REPLACE_WITH_EXACT_CREATION_OBSERVATION_SHA256",
+  "expected_cleanup_authority_sha256": "REPLACE_WITH_SIGNED_CLEANUP_AUTHORITY_SHA256",
+  "namespace": "la_REPLACE_WITH_EXACT_32_HEX_NAMESPACE",
+  "receipt_root": "cleanup-receipts/EXACT_NAMESPACE"
+}
