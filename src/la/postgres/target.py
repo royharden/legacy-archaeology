@@ -114,7 +114,8 @@ def driver_and_connect(dsn, config):
 
 def inspect_target(connection, config):
     with connection.cursor() as cursor:
-        cursor.execute('SELECT current_database(), current_user, inet_server_addr()::text, inet_server_port(), current_setting(\'server_version_num\')::int')
+        # host() drops the netmask; inet::text would render '127.0.0.1/32' and never match.
+        cursor.execute('SELECT current_database(), current_user, host(inet_server_addr()), inet_server_port(), current_setting(\'server_version_num\')::int')
         database, role, host, port, version = cursor.fetchone()
         if (database, role, host, port, version // 10000) != (config.database, config.role, config.host, config.port, config.server_major):
             raise ValueError('actual target identity/version mismatch')
