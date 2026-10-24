@@ -20,7 +20,8 @@ from evaluation.artifacts import CaptureStore, digest
 from evaluation.benchmark import ARMS, FREEZE_KEYS, SPLITS
 from evaluation.edition_registry import EditionRegistry, EligibilityContext
 from evaluation.eligibility import ISOLATION_KINDS, make_commitment, make_freeze, variant_identity
-from evaluation.protected_live import (ProtectedLiveContext, T3OverrunError, require_protected_ports,
+from evaluation.protected_live import (ProtectedLiveContext, T3OverrunError, _reserve, assert_no_unknown_live_liability,
+                                       require_protected_ports,
                                        validate_scope)
 from evaluation.public_live import BillingAdapter
 from evaluation.runner import RequestGateway
@@ -316,6 +317,120 @@ class ProtectedLiveAuthority(unittest.TestCase):
             payload['caps']['max_total_requests'] = 79
             with self.assertRaises(ValueError): validate_scope(payload, e.commitment, e.freeze, e.suite)
 
+
+def reserve_unsent(context, candidate, method='C0'):
+    """Durable reservation exactly as the port writes it, then a simulated crash before transport."""
+    registry = context.registry
+    context.admit(request_id='t3-admit', expected_head=registry.head)
+    context.eligibility.begin(request_id='t3-begin', expected_head=registry.head)
+    context.eligibility.claim_arm(candidate.variant_id, method)
+    scope = context.validate(check_time=False)
+    call_id = digest(['synthetic unsent call', method])
+    registry._append(EDITION, 't3_request_reserved', {
+        'attempt_id': scope['attempt_id'], 'variant_id': candidate.variant_id, 'method': method,
+        'call_id': call_id, 'request_no': 1, 'prompt_sha256': digest('synthetic gateway prompt'),
+        'source_sha256': candidate.visible['source_sha256'], 'input_tokens': 50,
+        'output_limit': scope['caps']['max_output_tokens'], 'reserved_usd': str(_reserve(scope))},
+        request_id='t3-reserve:' + call_id, expected_head=registry.head)
+    return scope, call_id
+
+
+def ledger_attestation(context, scope, candidate, call_id, *, method='C0', attempts=(), prompt=None, phase='T3',
+                       fenced=True, fence_id=None):
+    """Shape of D7 CallLedger.fence_unsent() (seam Amendment A1.1); synthetic, not a real ledger."""
+    query = {'evaluation_phase': phase, 'evaluation_authority_sha256': scope['scope_sha256'],
+             'gateway_prompt_sha256': prompt or digest('synthetic gateway prompt'),
+             'source_sha256': candidate.visible['source_sha256'], 'evaluator_method': method}
+    fence = ({'schema_version': 1, 'kind': 'unsent_fence', 'fence_id': fence_id or call_id, **query,
+              'cost_known': True, 'cost_usd': '0', 'fenced_at': '2026-01-01T00:00:00Z'} if fenced else None)
+    capture = {'schema_version': 1, 'kind': 'call_ledger_attestation', 'ledger_path_sha256': digest('synthetic ledger'),
+               'query': query, 'attempts': list(attempts), 'fenced': fenced, 'fence': fence,
+               'observed_at': '2026-01-01T00:00:00Z'}
+    capture['attestation_sha256'] = digest(capture)
+    return context.registry.store.put('call_ledger_attestation', capture)
+
+
+def signed_void(context, scope, call_id, ledger_ref, **change):
+    payload = {'schema_version': 1, 'action': 'void_unsent_live_reservation', 'phase': 'T3', 'edition': EDITION,
+               'attempt_id': scope['attempt_id'], 'call_id': call_id, 'authority_sha256': scope['scope_sha256'],
+               'ledger_path_sha256': digest('synthetic ledger'), 'ledger_capture': ledger_ref, **change}
+    return sign(payload)
+
+
+class ProtectedUnsentVoid(unittest.TestCase):
+    def test_void_clears_unsent_reservation_and_unblocks_live_work(self):
+        """what_bug_this_catches: a crash before transport blocks every later live call forever."""
+        with TemporaryDirectory() as directory:
+            context, candidate = protected_context(directory)
+            scope, call_id = reserve_unsent(context, candidate)
+            with self.assertRaises(ValueError):
+                assert_no_unknown_live_liability(context.registry.events())
+            context.void_unsent_reservation(signed_void(context, scope, call_id,
+                ledger_attestation(context, scope, candidate, call_id)), request_id='void-1')
+            assert_no_unknown_live_liability(context.registry.events())
+            call = context.registry.state(EDITION)['t3']['calls'][call_id]
+            self.assertEqual((call['status'], call['known_cost'], call['voided']), ('known', '0', True))
+            # Single flight is released; the voided call still counts toward this arm's cap.
+            gateway_port = context.provider_port(lambda r: native_reply(context, candidate, 'C0', r), [candidate], lambda p: 50)
+            gateway = RequestGateway('C0', 'live', candidate.visible,
+                                     replace(fake_ports(), provider=gateway_port, count_tokens=lambda p: 50),
+                                     context.registry.store, context.eligibility.request_authority())
+            with self.assertRaisesRegex(ValueError, 'cap exhausted'):  # request_no 1 consumed by the voided call
+                gateway.request('rank')
+
+    def test_ledger_attempt_or_wrong_query_refuses_void(self):
+        """what_bug_this_catches: a call that reached D7 (possibly billed) is voided to zero."""
+        for case_name in ('attempt_exists', 'other_prompt', 'other_phase', 'ledger_path', 'not_fenced', 'other_fence'):
+            with self.subTest(case=case_name), TemporaryDirectory() as directory:
+                context, candidate = protected_context(directory)
+                scope, call_id = reserve_unsent(context, candidate)
+                if case_name == 'attempt_exists':
+                    ref = ledger_attestation(context, scope, candidate, call_id, attempts=[{'status': 'reserved'}], fenced=False)
+                elif case_name == 'other_prompt':
+                    ref = ledger_attestation(context, scope, candidate, call_id, prompt=digest('another prompt'))
+                elif case_name == 'other_phase':
+                    ref = ledger_attestation(context, scope, candidate, call_id, phase='T1')
+                elif case_name == 'not_fenced':  # a read-only snapshot cannot fence an in-flight send
+                    ref = ledger_attestation(context, scope, candidate, call_id, fenced=False)
+                elif case_name == 'other_fence':
+                    ref = ledger_attestation(context, scope, candidate, call_id, fence_id=digest('another call'))
+                else:
+                    ref = ledger_attestation(context, scope, candidate, call_id)
+                change = {'ledger_path_sha256': digest('another ledger')} if case_name == 'ledger_path' else {}
+                with self.assertRaises(ValueError):
+                    context.void_unsent_reservation(signed_void(context, scope, call_id, ref, **change), request_id='void')
+                self.assertEqual(context.registry.state(EDITION)['t3']['calls'][call_id]['status'], 'reserved')
+
+    def test_unknown_after_transport_cannot_be_voided(self):
+        """what_bug_this_catches: unknown-after-transport liability erased by a void instead of billing evidence."""
+        with TemporaryDirectory() as directory:
+            context, candidate = protected_context(directory)
+            def inner(request): raise TimeoutError('synthetic transport timeout')
+            gateway = started_gateway(context, candidate, 'C0', inner)
+            with self.assertRaises(TimeoutError): gateway.request('rank')
+            scope = context.validate(check_time=False)
+            call_id, call = next(iter(context.registry.state(EDITION)['t3']['calls'].items()))
+            # A real D7 timeout happens after D7 reserve, so the fence finds that attempt and writes nothing.
+            ref = ledger_attestation(context, scope, candidate, call_id, prompt=call['prompt_sha256'],
+                                     attempts=[{'status': 'unknown_liability'}], fenced=False)
+            with self.assertRaises(ValueError):
+                context.void_unsent_reservation(signed_void(context, scope, call_id, ref), request_id='void')
+            self.assertEqual(context.registry.state(EDITION)['t3']['calls'][call_id]['status'], 'unknown')
+
+    def test_reply_less_unknown_after_d7_refusal_is_voidable(self):
+        """what_bug_this_catches: a fence-refused reserve leaves an unknown call that can never be cleared."""
+        with TemporaryDirectory() as directory:
+            context, candidate = protected_context(directory)
+            def inner(request): raise ValueError('synthetic D7 reserve refused: fenced pins')
+            gateway = started_gateway(context, candidate, 'C0', inner)
+            with self.assertRaises(ValueError): gateway.request('rank')
+            scope = context.validate(check_time=False)
+            call_id, call = next(iter(context.registry.state(EDITION)['t3']['calls'].items()))
+            self.assertEqual((call['status'], call['reply_sha256'], call['billing_receipt']), ('unknown', None, None))
+            ref = ledger_attestation(context, scope, candidate, call_id, prompt=call['prompt_sha256'])
+            context.void_unsent_reservation(signed_void(context, scope, call_id, ref), request_id='void')
+            self.assertEqual(context.registry.state(EDITION)['t3']['calls'][call_id]['known_cost'], '0')
+            assert_no_unknown_live_liability(context.registry.events())
 
 if __name__ == '__main__':
     unittest.main()
