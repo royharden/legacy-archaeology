@@ -1,0 +1,3 @@
+# Fixed-width inputs carry byte hashes and explicit LF/CRLF framing policies.
+# Never rewrite their bytes on checkout, regardless of core.autocrlf.
+*.dat -text
