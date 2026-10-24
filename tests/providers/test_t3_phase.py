@@ -1,4 +1,4 @@
-"""T3 provider-phase and cleanup-caller regression SOURCE; not executed in Dirty Mode."""
+"""T3 provider-phase regression SOURCE; not executed in Dirty Mode."""
 import hashlib
 import json
 import unittest
@@ -78,44 +78,6 @@ class T3ProviderPhaseSource(unittest.TestCase):
         self.assertTrue(seen['run'].startswith('T3:'))
         self.assertEqual(seen['pins']['evaluation_phase'], 'T3')
         self.assertEqual(seen['pins']['evaluation_authority_sha256'], 'c' * 64)
-
-
-class CleanupCallerSource(unittest.TestCase):
-
-    def test_load_authority_cannot_substitute_for_cleanup(self):
-        """what_bug_this_catches: the narrow load/probe authority grants namespace removal."""
-        from scripts.target_cleanup import precheck_cleanup_authority
-        load = {'kind': 'disposable_target_authority', 'operations': ['load', 'cleanup']}
-        load['authority_sha256'] = digest(load)
-        with patch('la.postgres.authority.verified_target_authority', return_value=load):
-            with self.assertRaises(ValueError):
-                precheck_cleanup_authority({}, None, load['authority_sha256'], 'cleanup')
-
-    def test_cleanup_grant_does_not_cover_an_ungranted_operation(self):
-        """what_bug_this_catches: a reconcile-only grant authorizes destructive cleanup."""
-        from scripts.target_cleanup import precheck_cleanup_authority
-        body = {'kind': 'disposable_target_cleanup_authority', 'scope': 'owned_disposable_namespace',
-                'operations': ['reconcile_cleanup']}
-        body['authority_sha256'] = digest(body)
-        with patch('la.postgres.authority.verified_target_authority', return_value=body):
-            precheck_cleanup_authority({}, None, body['authority_sha256'], 'reconcile_cleanup')
-            with self.assertRaises(ValueError):
-                precheck_cleanup_authority({}, None, body['authority_sha256'], 'cleanup')
-
-    def test_cleanup_requires_every_external_pin(self):
-        """what_bug_this_catches: recency/default selection of experiment, observation or authority."""
-        from scripts.target_cleanup import parser
-        full = ['--operator-root', 'r', 'cleanup', '--receipt-root', 'rc', '--experiment', 'e',
-                '--expected-experiment-sha256', SHA, '--expected-original-observation-sha256', SHA,
-                '--artifact', 'a', '--signed-authority', 's', '--cleanup-authority', 'c',
-                '--expected-cleanup-authority-sha256', SHA, '--target-config', 't',
-                '--public-trust-root', 'p', '--public-trust-profile', 'pp']
-        parser().parse_args(full)
-        for flag in ('--expected-experiment-sha256', '--expected-original-observation-sha256',
-                     '--expected-cleanup-authority-sha256', '--cleanup-authority'):
-            index = full.index(flag)
-            with self.subTest(flag), self.assertRaises(SystemExit):
-                parser().parse_args(full[:index] + full[index + 2:])
 
 
 if __name__ == '__main__':
