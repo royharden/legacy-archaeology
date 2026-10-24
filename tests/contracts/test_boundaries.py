@@ -65,7 +65,7 @@ class BoundaryTests(unittest.TestCase):
         """what_bug_this_catches: optional source diagnostics silently materialize in old pins."""
         value = dict(schema_version=1, source_sha256='1'*64, framing_sha256='2'*64, framing='unresolved',
             encoding='ASCII', declared_format={'encoding':'ASCII'}, width=None, status='refused', reasons=['empty_input'],
-            records=[], brief_sha256='3'*64, samples=dict(authorization='',artifact_sha256=None,
+            records=[], brief_sha256='3'*64, samples=dict(authorization='',artifact_sha256=sha256(b'public empty permission artifact'),
                 records=[],selected_ordinals=[],truncated=False), config_sha256='4'*64)
         self.assertEqual(validate_batch(value),value)
         emitted = dict(value,intake={})

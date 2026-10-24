@@ -25,8 +25,10 @@ class QuestionContext(unittest.TestCase):
         batch, generation = fixture()
         data = b'\r\n'.join(RAW)
         span = RAW[0][8:14]
+        original = batch['records'][0]
+        ref = {key: original[key] for key in ('source_sha256', 'framing_sha256', 'ordinal', 'byte_start', 'length', 'raw_sha256')}
         samples = {'source_sha256': sha256(data), 'authorization': 'balance span only',
-                   'records': [{'ordinal': 0, 'start': 8, 'end': 14,
+                   'records': [{'record_ref': ref, 'span': {'start': 8, 'end': 14},
                                 'raw_hex': span.hex(), 'raw_sha256': sha256(span)}]}
         batch = ingest_bytes(data, BRIEF, samples)
         generation = deepcopy(generation)
