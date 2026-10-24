@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 def factory(context,*,provider_authority=None):
+    """Wire provider.preflight(request) into the evaluator's pre-reserve metering seam."""
     from evaluation.runner import RunnerPorts
     from la.contracts import REQUIRED_FIELDS, digest
     from la.ingest import ingest_bytes
@@ -117,6 +118,11 @@ def factory(context,*,provider_authority=None):
             row['evidence']['template_proposal_sha256'] = template['proposal_sha256']
         return result['outcomes']
 
+    preflight = {}
+    if 'provider_preflight' in RunnerPorts.__dataclass_fields__:
+        preflight['provider_preflight'] = provider.preflight
+    elif context.get('provider_config') is not None:
+        raise ValueError('live product ports require evaluator provider_preflight support')
     return RunnerPorts(heuristic=heuristic, candidates=candidates, questions=questions,
         mapping=mapping, validate_mapping=validate, transform=transform, provider=provider,
-        count_tokens=lambda text: len(text.encode('utf-8')))
+        count_tokens=lambda text: len(text.encode('utf-8')), **preflight)
