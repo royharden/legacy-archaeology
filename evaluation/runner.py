@@ -153,8 +153,8 @@ class RequestGateway:
     def request(self, purpose: str, candidates: list[dict] | None = None) -> object:
         if self.busy or len(self.attempts) >= ARMS[self.method]['max_requests']:
             raise ValueError('request budget/single-flight violation')
-        if any(item.get('cost_status') == 'unknown' for item in self.attempts):
-            raise ValueError('unknown liability: no automatic further request')
+        if any(item.get('cost_status') == 'unknown' or item.get('t3_overrun') for item in self.attempts):
+            raise ValueError('unknown liability/T3 overrun: no automatic further request')
         if self.ports.provider is None:
             raise ValueError('provider port unavailable; no silent fallback')
         prompt = {'purpose': purpose, 'input': _prompt_input(self.visible)}
@@ -220,11 +220,34 @@ class RequestGateway:
             if self.meter is not None and not settled:
                 self.meter.settle(call_id, error_type=type(exc).__name__)
             item.update(status='failed', error_type=type(exc).__name__)
+            overrun = _t3_overrun_cost(exc)
+            if overrun is not None:
+                # Truthfully settled T3 overrun: the registry holds this known cost too.
+                item.update(cost_status='known', known_cost=overrun, t3_overrun=True)
             # Exception messages may contain DSNs/keys from external adapters.
             raise
         finally:
             item['latency_seconds'] = perf_counter() - start
             self.busy = False
+
+
+def _t3_overrun_cost(exc: Exception) -> str | None:
+    """Known cost carried by a D6 T3OverrunError; None for every other failure."""
+    from .edition_registry import _protected_live
+    protected = _protected_live(required=False)
+    if protected is None or not isinstance(exc, protected.T3OverrunError):
+        return None
+    try:
+        amount = Decimal(str(exc.known_cost))
+    except (InvalidOperation, AttributeError):
+        return None
+    return str(amount) if amount.is_finite() and amount >= 0 else None
+
+
+def _require_protected_ports(ports: RunnerPorts, eligibility) -> None:
+    """Live heldout providers must be the D6 metered T3 port; absent module fails closed."""
+    from .edition_registry import _protected_live
+    _protected_live().require_protected_ports(ports, eligibility)
 
 
 def _questions(value: object) -> list[dict]:
@@ -287,6 +310,8 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
         # Recheck registry revocation/exposure and exact pins before every arm.
         _authorize(mode, case, authority, freeze, custody, pins, eligibility=eligibility, store=store)
         if mode == 'live' or case.split == 'heldout':
+            if mode == 'live' and case.split == 'heldout':
+                _require_protected_ports(ports, eligibility)
             eligibility.claim_arm(case.variant_id, method)
         from .public_live import PublicLiveContext
         public_live = type(eligibility) is PublicLiveContext and mode == 'live'
@@ -308,6 +333,11 @@ def run_variant(case: VariantCase, ports: RunnerPorts, store: CaptureStore, *,
                     questions = _questions(ports.questions(deepcopy(generation)))
                     if public_live and len(questions) > eligibility.validate()['caps']['max_questions']:
                         raise ValueError('signed T1 question cap exceeded')
+                    from .edition_registry import _protected_live
+                    protected = _protected_live(required=False)
+                    cap = protected.question_cap(ports) if protected is not None else None
+                    if cap is not None and len(questions) > cap:
+                        raise ValueError('signed T3 question cap exceeded')
                 if method == 'R1':
                     broker = SimulatedSME(deepcopy(case.accepted_choices))
                     answers = [broker.answer(question) for question in questions]
@@ -454,6 +484,8 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
             raise ValueError('wrong ordered declared suite')
         if any(variant_identity(case) != declared.get(case.variant_id) for case in cases):
             raise ValueError('actual source/sample/brief/oracle differs from T0')
+        if mode == 'live' and split == 'heldout':
+            _require_protected_ports(ports, eligibility)
         started = eligibility.begin(request_id=attempt_request_id, expected_head=expected_registry_head)
         if not started.newly_created:
             raise ValueError('historical attempt receipt returned; execution must not repeat')
