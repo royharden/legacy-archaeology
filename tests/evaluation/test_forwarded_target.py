@@ -24,7 +24,7 @@ class ForwardedTarget(unittest.TestCase):
         target = dict(original.target, host='172.17.0.8', connection_host='127.0.0.1',
                       connection_port=21800)
         for change in ({'connection_host': '192.168.1.1'}, {'connection_port': 20178},
-                       {'host': '8.8.8.8'}, {'host': '0.0.0.0'}):
+                       {'host': '8.8.8.8'}, {'host': '0.0.0.0'}, {'host': '::1%zone'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 replace(original, target={**target, **change}).validate()
         expected = replace(original, target=target)

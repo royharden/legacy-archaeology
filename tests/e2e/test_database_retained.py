@@ -35,6 +35,7 @@ class RetainedDatabaseJourney(unittest.TestCase):
         self.root = self.evidence / ('db-' + uuid.uuid4().hex)
         self.root.mkdir()
         batch, generation, store, mapping = answered(self.root)
+        self.batch, self.generation = batch, generation
         approval = approve_mapping(mapping, 'RV2', 'public hand-derived disposable fixture')
         self.bundle = self.root / 'bundle'
         self.manifest = export_bundle(self.bundle, batch, mapping, transform(batch, mapping), approval,
@@ -160,6 +161,58 @@ class RetainedDatabaseJourney(unittest.TestCase):
         receipt = json.loads(Path(pointer['path']).read_text(encoding='utf-8'))
         self.assertEqual(receipt['payload']['observation']['execution_status'], 'committed_readback', receipt)
         self.assertEqual((self.bundle / 'manifest.json').read_bytes(), original_manifest)
+
+    def test_all_five_target_arms_grade_real_controlled_effects(self):
+        """what_bug_this_catches: fake negative flags or ACK claims clear W7 grading."""
+        from la.postgres import (prepare_evaluation_candidate_v2, target_observer_v2,
+                                 collect_controlled_failed_load, collect_controlled_lost_ack,
+                                 observer_code_pin)
+        from postgres.test_target_candidates import ephemeral_signer
+        from postgres.test_controlled_target import phase_intent
+        from review.support import proposal
+        from evaluation.target_effects import TargetExpectation, grade_target, STATES
+        from evaluation.scorer import REF_KEYS
+        types = {'account_ref': 'text', 'description': 'text', 'balance': 'decimal',
+                 'effective_date': 'date', 'status': 'text'}
+        literal_values = [
+            dict(account_ref='0007', description='AB', balance='0.00', effective_date='2024-02-29', status='A'),
+            dict(account_ref='0007', description='', balance='1.23', effective_date='2024-03-01', status='B'),
+            dict(account_ref='0007', description='AB', balance='0.00', effective_date='2024-02-29', status='A')]
+        oracle = [dict(record_ref={key: row[key] for key in REF_KEYS}, expected_outcome='converted', reasons=[],
+                       fields={name: dict(data_type=types[name], value=value) for name, value in values.items()})
+                  for row, values in zip(self.batch['records'], literal_values, strict=True)]
+        columns = [['source_sha256', 'text', 'NO', None, None], ['ordinal', 'bigint', 'NO', 64, 0],
+                   ['raw_sha256', 'text', 'NO', None, None], ['account_ref', 'text', 'NO', None, None],
+                   ['description', 'text', 'NO', None, None], ['balance', 'numeric', 'NO', 6, 2],
+                   ['effective_date', 'date', 'NO', None, None], ['status', 'text', 'NO', None, None]]
+        for method in ('B0', 'B1', 'C0', 'R0', 'R1'):
+            with self.subTest(method=method):
+                artifact = prepare_evaluation_candidate_v2(self.batch, proposal(self.batch, self.generation, method),
+                             edition='public-rv2-target-regression', evaluation_phase='T1', split='development',
+                             evaluation_plan_sha256=digest('PB-M1-R03-public-target-plan'))
+                verifier, sign = ephemeral_signer(self)
+                body = phase_intent(artifact)
+                authority = sign(body)
+                config = replace(self.config_base, authority_reference=body['authority_sha256'],
+                                 expected_candidate_sha256=artifact['descriptor']['candidate_sha256'])
+                kwargs = dict(dsn=self.dsn, target_config=config, authority_verifier=verifier)
+                positive = target_observer_v2(artifact, authority, negative_kinds=tuple(STATES), **kwargs)
+                self.capture(method + '-positive', positive)
+                failed = collect_controlled_failed_load(artifact, authority, **kwargs)
+                self.capture(method + '-failed-load', failed)
+                pair = collect_controlled_lost_ack(artifact, authority, **kwargs)
+                self.capture(method + '-controlled-ack', pair)
+                target = dict(database='m1_rv2', role='m1_rv2', host='172.17.0.8', port=21800,
+                              connection_host='127.0.0.1', connection_port=21800, server_version_num=170006,
+                              authority_reference=body['authority_sha256'], scope='disposable_local_test',
+                              driver_version='3.3.6')
+                expected = TargetExpectation(artifact['descriptor'], body['authority_sha256'], digest(config.public()),
+                                             observer_code_pin(), target, columns)
+                result = grade_target(oracle, positive, expectation=expected, prior=pair['prior'],
+                                      failed_load=failed, recovery_observation=pair['reconciled'])
+                self.capture(method + '-independent-grade', result)
+                self.assertEqual(result['target_validation'], 'passed', result)
+                self.assertEqual(result['product_acceptance'], 'pending')
 
 
 if __name__ == '__main__':
