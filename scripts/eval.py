@@ -46,6 +46,47 @@ def parser():
     return p
 
 
+def t3_precheck(protected,cases):
+    """Everything provider_port/run_suite will demand of the cases, checked before admission."""
+    from la.contracts import digest
+    from evaluation.runner import _prompt_input
+    suite=protected.eligibility.suite
+    if ([case.variant_id for case in cases]!=suite['variant_ids']
+            or any(case.split!='heldout' or case.edition!=protected.edition for case in cases)):
+        raise ValueError('T3 cases must be exactly the declared heldout suite variants of this edition')
+    if len({digest(_prompt_input(case.visible)) for case in cases})!=len(cases):
+        raise ValueError('two heldout variants share one provider-visible input; ambiguous T3 attribution')
+    protected.eligibility.validate()
+
+
+def t3_question_cap(questions,cap):
+    """Signed max_questions per layout; also enforced if the runner gains D6's question_cap hook."""
+    def capped(visible):
+        value=questions(visible)
+        if len(value)>cap: raise ValueError('signed T3 question cap exceeded')
+        return value
+    return capped
+
+
+def admit_t3(protected,config):
+    """Admit the signed scope once; an exact resume continues only from its own admission head."""
+    registry=protected.registry
+    admitted=registry.state(protected.edition).get('t3')
+    if admitted is None:
+        receipt=protected.admit(request_id=config['t3_admission_request_id'],
+                                expected_head=config.get('expected_registry_head'))
+        return receipt.event['event_sha256']
+    if admitted['scope_receipt_sha256']!=protected.scope_sha256():
+        raise ValueError('a different T3 scope is already admitted for this edition')
+    events=registry.events()
+    last=events[-1] if events else None
+    # No recency guess: resume only if this scope's admission is still the exact head.
+    if (last is None or last['event_type']!='t3_scope_admitted'
+            or last['payload']['scope_receipt_sha256']!=protected.scope_sha256()):
+        raise ValueError('registry advanced after this T3 admission; inspect edition-state before any new attempt')
+    return last['event_sha256']
+
+
 def execute(args):
     # This script is deliberately outside the installed inference distribution.
     base = Path(__file__).resolve().parents[1]
@@ -86,12 +127,9 @@ def execute(args):
                 raise ValueError('T3 spend scope applies only to a live heldout suite with the trusted product ports')
             if type(config.get('t3_admission_request_id')) is not str or not config['t3_admission_request_id']:
                 raise ValueError('explicit T3 scope admission request id required')
-            # Admission is recorded before any provider wiring; the signed scope
-            # pins the registry head it was signed against.
-            admitted=eligibility.admit(request_id=config['t3_admission_request_id'],
-                                       expected_head=config.get('expected_registry_head'))
+            # Admission is irreversible (one scope per edition), so it happens in
+            # admit_t3() only after every admission-free suite check has passed.
             protected,eligibility=eligibility,eligibility.eligibility
-            suite_head=admitted.event['event_sha256']
         elif type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
         if args.mode=='live' and args.split=='heldout' and protected is None:
             raise ValueError('live heldout requires a signed admitted T3 spend scope; no unmetered provider')
@@ -151,6 +189,16 @@ def execute(args):
         if set(context) & forbidden:
             raise ValueError('factory context must not contain evaluator-only inputs')
         selected_factory=getattr(importlib.import_module(module),symbol)
+        target_ports=None
+        if args.target_factory:
+            from evaluation.target_runner import TargetPorts
+            module,separator,symbol=args.target_factory.partition(':')
+            if not separator: raise ValueError('explicit target module:factory required')
+            target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
+            if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
+        if protected is not None:
+            t3_precheck(protected,cases)
+            suite_head=admit_t3(protected,config)
         if args.ports=='scripts.product_ports:factory':
             from evaluation.public_live import PublicLiveContext
             signed_provider=(eligibility.validate() if type(eligibility) is PublicLiveContext
@@ -162,14 +210,8 @@ def execute(args):
             import dataclasses
             if ports.count_tokens is None: raise ValueError('T3 meter requires the explicit token counter')
             # D6 meter reserves/settles in the registry around the trusted D7 transport.
-            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens))
-        target_ports=None
-        if args.target_factory:
-            from evaluation.target_runner import TargetPorts
-            module,separator,symbol=args.target_factory.partition(':')
-            if not separator: raise ValueError('explicit target module:factory required')
-            target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
-            if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
+            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens),
+                                      questions=t3_question_cap(ports.questions,protected.validate()['caps']['max_questions']))
         result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
             authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
             eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=suite_head,

@@ -7,10 +7,6 @@ import argparse
 from pathlib import Path
 
 
-MAX_ROOTS=64  # evaluation.archive.MAX_ROOTS
-MAX_CASES=18  # evaluation.archive.MAX_CASES: distinct variants in the transitive closure
-
-
 def hidden_marker(manifest):
     """Root-level copy of the producer's hidden markers; the producer still checks every reached capture."""
     return (manifest.get('split')=='heldout' or manifest.get('evaluation_phase')=='T3'
@@ -22,7 +18,8 @@ def plan_from_packet(store,registry,root,packet):
     from la.app.artifacts import within,read
     from scripts.results import captured
     from evaluation.runner import VariantCase,BatchCase
-    from evaluation.archive import plan_archive
+    # The producer's own bounds (roots; distinct transitive variants), never a drifting copy.
+    from evaluation.archive import plan_archive,MAX_ROOTS,MAX_CASES
     closed(packet,{'schema_version','edition','visibility','manifest_refs','cases','configuration'})
     if type(packet['schema_version']) is not int or packet['schema_version']!=1 or packet['visibility'] not in ('public','retired'):
         raise ValueError('closed public/retired archive caller packet required')
