@@ -2,7 +2,7 @@
 import re
 from collections import defaultdict
 from la.contracts import REQUIRED_FIELDS, digest, sha256, validate_batch, validate_generation
-from la.ingest.evidence import resolve_evidence
+from la.ingest.evidence import authorized_spans, resolve_evidence
 from la.ingest.inspection import inspection_detail, inspection_page
 
 MAX_EXAMPLES = 3
@@ -86,7 +86,7 @@ def _example(batch, generation, candidate, ordinal, authorized_only):
     row = detail['row']
     if row is None: return None
     cells = {cell['position']: cell for cell in row['cells']}
-    permitted = [(item['start'], item['end']) for item in batch['samples'].get('authorized_spans', [])
+    permitted = [(item['start'], item['end']) for item in authorized_spans(batch)
                  if item['ordinal'] == ordinal] if authorized_only else [(candidate['start'], candidate['end'])]
     proofs, seen, possible = [], set(), 0
     for left, right in permitted:
@@ -150,10 +150,11 @@ def _explain(batch, generation, page, groups, candidate_id, authorized_only, exa
         reasons.append('No status vocabulary is disclosed in these policy choices. An unlisted code is unknown, not a manufactured malformed-code verdict.')
     reasons.append('If the true span/name/policy combination is absent, choose unknown; bounded alternatives do not prove coverage.')
     ordinals = []
+    selection = authorized_spans(batch) if authorized_only else []
     for record in batch['records']:
         if candidate['end'] > record['length']: continue
         if authorized_only and not any(item['ordinal'] == record['ordinal'] and item['start'] < candidate['end'] and candidate['start'] < item['end']
-                                       for item in batch['samples'].get('authorized_spans', [])): continue
+                                       for item in selection): continue
         ordinals.append(record['ordinal'])
     for ordinal in ordinals[:examples_limit]:
         example = _example(batch, generation, candidate, ordinal, authorized_only)

@@ -1,4 +1,4 @@
-"""Independent D5 v2 target/effect grading. No product/driver imports.
+"""Independent D5 v2/v3 target/effect grading. No product/driver imports.
 
 Externally pinned observer/candidate/authority identity is required. A hash is an
 identity check, not proof that a collector ran; authentic capture remains the
@@ -30,6 +30,7 @@ PHASE_KEYS = {'evaluation_phase', 'split', 'evaluation_plan_sha256'}
 STATES = {'rollback': {'22012'}, 'nonnull': {'23502'}, 'check': {'23514'},
           'numeric_overflow': {'22003'}, 'duplicate_identity': {'23505'},
           'invalid_date': {'22007', '22008'}}
+OBSERVATION_VERSIONS = (2, 3)
 
 
 def _closed_version(value, keys, version, label):
@@ -51,6 +52,25 @@ def _uuid(value):
 def _namespace(value):
     if not isinstance(value, str) or re.fullmatch('la_[0-9a-f]{32}', value) is None:
         raise ValueError('owned disposable namespace required')
+
+
+def _issues(value):
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError('bounded observation issues required')
+    for issue in value:
+        if (not isinstance(issue, dict) or 'code' not in issue or set(issue) - {'code', 'error_type'}
+                or any(not isinstance(item, str) or not item or len(item) > 100 for item in issue.values())):
+            raise ValueError('unknown observation issue fields')
+
+
+def _provenance_rows(rows):
+    if not isinstance(rows, list) or len(rows) > 10000:
+        raise ValueError('bounded actual provenance rows required')
+    for row in rows:
+        closed(row, {'source_sha256', 'ordinal', 'raw_sha256'}, 'actual provenance row')
+        if (not is_sha(row['source_sha256']) or not is_sha(row['raw_sha256'])
+                or type(row['ordinal']) is not int or row['ordinal'] < 0):
+            raise ValueError('invalid actual provenance identity')
 
 
 @dataclass(frozen=True)
@@ -124,9 +144,16 @@ class TargetExpectation:
         return self
 
 
+def validate_target_observation(value, *, expectation):
+    """Closed wire validation only; no effect acceptance, transport or repair."""
+    expectation.validate()
+    return _observation(value, expectation)
+
+
 def _observation(value, expected):
     version = value.get('schema_version') if isinstance(value, dict) else None
-    if version not in (2, 3): raise ValueError('unknown target observation version')
+    if type(version) is not int or version not in OBSERVATION_VERSIONS:
+        raise ValueError('unknown target observation version')
     item = _closed_version(value, OBS_KEYS | ({'controlled_fault'} if version == 3 else set()), version, 'target observation')
     _sealed(item, 'observation_sha256')
     if item['kind'] != 'target_observation' or item['candidate'] != expected.candidate:
@@ -144,26 +171,35 @@ def _observation(value, expected):
         raise ValueError('unbound connection/recovery identity')
     if item['commit_state'] not in ('not_run', 'failed', 'indeterminate', 'committed'):
         raise ValueError('unknown commit state')
-    if not isinstance(item['issues'], list) or not isinstance(item['negative_effects'], list) or len(item['negative_effects']) > 7:
+    if not isinstance(item['issues'], list) or len(item['issues']) > 32 or not isinstance(item['negative_effects'], list) or len(item['negative_effects']) > 7:
         raise ValueError('bounded issues/effects required')
-    for issue in item['issues']:
-        if (not isinstance(issue, dict) or 'code' not in issue or set(issue) - {'code', 'error_type'}
-                or any(not isinstance(value, str) or len(value) > 100 for value in issue.values())):
-            raise ValueError('unknown observation issue fields')
+    _issues(item['issues'])
     if item['readback'] is not None:
         rb = closed(item['readback'], {'capture', 'query_sha256', 'columns', 'rows', 'rows_sha256'}, 'readback wire')
         if not isinstance(rb['rows'], list) or len(rb['rows']) > 10000:
             raise ValueError('bounded concrete readback rows required')
         for row in rb['rows']:
             closed(row, {'record_ref', 'mapping_sha256', 'outcome', 'values'}, 'observed row wire')
+            identity(row['record_ref'])
+            if not is_sha(row['mapping_sha256']) or row['outcome'] != 'converted':
+                raise ValueError('invalid observed mapping/outcome')
+            closed(row['values'], set(FIELDS), 'observed semantic values')
+            if any(value is not None and (not isinstance(value, str) or len(value) > 16384) for value in row['values'].values()):
+                raise ValueError('bounded textual target values required')
     for effect in item['negative_effects']:
         _closed_version(effect, EFFECT_KEYS, 1, 'negative effect wire')
         _sealed(effect, 'effect_sha256')
+        _issues(effect['issues'])
         for key in ('before', 'after'):
             if effect[key] is not None:
                 _snapshot(effect[key])
         if effect['transaction'] is not None:
-            closed(effect['transaction'], {'connection_id', 'statement_sha256', 'sqlstate', 'error_class'}, 'transaction wire')
+            tx = closed(effect['transaction'], {'connection_id', 'statement_sha256', 'sqlstate', 'error_class'}, 'transaction wire')
+            if any(tx[key] is not None and not is_sha(tx[key]) for key in ('connection_id', 'statement_sha256')):
+                raise ValueError('invalid actual transaction hash')
+            if tx['sqlstate'] is not None and (not isinstance(tx['sqlstate'], str) or re.fullmatch('[0-9A-Z]{5}', tx['sqlstate']) is None):
+                raise ValueError('invalid observed SQLSTATE')
+            if tx['error_class'] is not None: text(tx['error_class'], 'server error class', 100)
     if item['recovery'] is not None:
         closed(item['recovery'], {'prior_observation_sha256', 'marker_query_sha256', 'marker_rows',
             'marker_rows_sha256', 'read_connection_id'}, 'recovery wire')
@@ -184,18 +220,33 @@ def _controlled_fault(observation):
     if value['boundary_sha256'] != digest({'operation': value['operation'], 'boundary': value['boundary'],
                                          'observer_code_sha256': observation['observer_code_sha256']}):
         raise ValueError('controlled fault definition differs from pinned observer')
+    if value['trigger_statement_sha256'] is not None and not is_sha(value['trigger_statement_sha256']):
+        raise ValueError('invalid controlled statement hash')
+    if value['injected_error_class'] is not None:
+        text(value['injected_error_class'], 'controlled error class', 100)
     if value['partial_write'] is not None:
         partial = closed(value['partial_write'], {'connection_id', 'query_sha256', 'rows', 'rows_sha256'}, 'partial write')
+        _provenance_rows(partial['rows'])
         hashes(partial, ('connection_id', 'query_sha256', 'rows_sha256'))
-        if partial['connection_id'] != observation['attempt']['write_connection_id'] or not isinstance(partial['rows'], list) or partial['rows_sha256'] != digest(partial['rows']):
+        if partial['connection_id'] != observation['attempt']['write_connection_id'] or not isinstance(partial['rows'], list) or len(partial['rows']) > 10000 or partial['rows_sha256'] != digest(partial['rows']):
             raise ValueError('partial insert lacks actual connection/query/row lineage')
+        for row in partial['rows']:
+            closed(row, {'source_sha256', 'ordinal', 'raw_sha256'}, 'partial row provenance')
+            if (row['source_sha256'] != observation['candidate']['source_sha256'] or not is_sha(row['raw_sha256'])
+                    or type(row['ordinal']) is not int or row['ordinal'] < 0):
+                raise ValueError('partial row has invalid source/ordinal/raw identity')
     if value['state'] == 'injected':
+        if observation['target'] is None or not is_sha(observation['attempt']['write_connection_id']):
+            raise ValueError('injected boundary requires actual target/write connection')
         text(value['injected_error_class'], 'controlled error class')
         if value['operation'] == 'controlled_failed_load':
-            if value['driver_commit_returned'] or value['partial_write'] is None or len(value['partial_write']['rows']) != 1 or not is_sha(value['trigger_statement_sha256']):
+            if (value['driver_commit_returned'] or value['partial_write'] is None or len(value['partial_write']['rows']) != 1
+                    or not is_sha(value['trigger_statement_sha256']) or observation['commit_state'] not in ('failed', 'indeterminate')):
                 raise ValueError('failed-load probe requires actual first insert/error before commit')
         elif (not value['driver_commit_returned'] or value['partial_write'] is not None
-                or value['trigger_statement_sha256'] is not None or value['injected_error_class'] != 'ControlledAcknowledgementSuppressed'):
+                or value['trigger_statement_sha256'] is not None or value['injected_error_class'] != 'ControlledAcknowledgementSuppressed'
+                or observation['commit_state'] not in ('indeterminate', 'committed')
+                or (observation['commit_state'] == 'committed' and observation['recovery'] is None)):
             raise ValueError('controlled ACK lacks actual driver return and deliberate suppression')
     return value
 
@@ -204,6 +255,7 @@ def _snapshot(value):
     snap = closed(value, {'connection_id', 'query_sha256', 'namespace_exists', 'table_exists',
         'rows', 'rows_sha256', 'rows_capture'}, 'durable namespace snapshot')
     hashes(snap, ('connection_id', 'query_sha256', 'rows_sha256'))
+    _provenance_rows(snap['rows'])
     if (type(snap['namespace_exists']) is not bool or type(snap['table_exists']) is not bool
             or not isinstance(snap['rows'], list) or snap['rows_sha256'] != digest(snap['rows'])
             or snap['rows_capture'] not in ('relation_absent', 'all_persisted_provenance_rows')):
@@ -234,6 +286,8 @@ def _effect(value, observation, expected, *, failed_load=False):
         return {'kind': item['probe_kind'], 'status': 'missing', 'effect_sha256': item['effect_sha256']}
     if item['transaction_state'] != 'rolled_back' or item['issues']:
         raise ValueError('failed/incomplete negative probe')
+    if any(item[key] is None for key in ('before', 'transaction', 'after')):
+        return {'kind': item['probe_kind'], 'status': 'missing', 'effect_sha256': item['effect_sha256']}
     before, after = _snapshot(item['before']), _snapshot(item['after'])
     tx = closed(item['transaction'], {'connection_id', 'statement_sha256', 'sqlstate', 'error_class'}, 'server failure')
     hashes(tx, ('connection_id', 'statement_sha256'))
@@ -253,21 +307,25 @@ def _effect(value, observation, expected, *, failed_load=False):
 
 
 def _recovery(observation, prior, expected, valid_count):
+    old = _observation(prior, expected) if prior is not None else None
     if observation['recovery'] is None or prior is None:
         return False
-    old = _observation(prior, expected)
     if old['commit_state'] != 'indeterminate':
         raise ValueError('lost-ACK evidence requires the actual unknown-commit predecessor')
     old_codes = {issue['code'] for issue in old['issues']}
     new_codes = {issue['code'] for issue in observation['issues']}
     recovery_kind = None
-    if 'commit_acknowledgement_unknown' in old_codes and 'reconciled_lost_commit_acknowledgement' in new_codes:
+    if old['schema_version'] != observation['schema_version']:
+        raise ValueError('recovery cannot change observation schema/boundary kind')
+    if old['target'] != expected.target or not is_sha(old['attempt']['write_connection_id']):
+        raise ValueError('recovery predecessor lacks actual target/write identity')
+    if old['schema_version'] == 2 and old_codes == {'commit_acknowledgement_unknown'} and new_codes == {'reconciled_lost_commit_acknowledgement'}:
         recovery_kind = 'observed_lost_commit_ack'
     elif old.get('schema_version') == 3 and observation.get('schema_version') == 3:
         fault = _controlled_fault(old)
         if (fault['operation'] == 'controlled_commit_ack' and fault['state'] == 'injected'
                 and observation['controlled_fault'] == old['controlled_fault']
-                and 'controlled_application_ack_suppressed' in old_codes and 'reconciled_controlled_application_ack' in new_codes):
+                and old_codes == {'controlled_application_ack_suppressed'} and new_codes == {'reconciled_controlled_application_ack'}):
             recovery_kind = 'controlled_application_ack'
     if recovery_kind is None: return False
     a, b = observation['attempt'], old['attempt']
@@ -354,10 +412,18 @@ def grade_target(oracle: list[dict], observation: dict | None, *, expectation: T
         observed = {entry['kind'] for entry in base['negative_effects'] if entry['status'] == 'observed'}
         base['missing'] = sorted(set(expectation.required_negatives) - observed)
         recovered = _observation(recovery_observation, expectation) if recovery_observation is not None else item
-        if recovery_observation is not None and _readback_report(valid, recovered, expectation, edition)['row_parity'] != 'exact':
-            raise ValueError('recovery readback disagrees with independent oracle')
-        recovery_kind = _recovery(recovered, prior, expectation, len(valid))
+        recovery_kind = False
+        if recovered['commit_state'] == 'committed' and recovered['readback'] is not None:
+            if recovery_observation is not None and _readback_report(valid, recovered, expectation, edition)['row_parity'] != 'exact':
+                raise ValueError('recovery readback disagrees with independent oracle')
+            recovery_kind = _recovery(recovered, prior, expectation, len(valid))
+        elif recovery_observation is not None:
+            base['missing'].append('committed_recovery_readback')
+            if prior is not None: _observation(prior, expectation)
         base['recovery_kind'] = recovery_kind or None
+        base['recovery_scope'] = ({'controlled_application_ack': 'driver_returned_application_ack_suppressed',
+                                  'observed_lost_commit_ack': 'observed_unknown_driver_ack'}.get(recovery_kind))
+        base['network_loss_proven'] = False
         if not recovery_kind:
             base['missing'].append('lost_ack_reconciliation')
         if failed_load is None:
@@ -377,6 +443,11 @@ def grade_target(oracle: list[dict], observation: dict | None, *, expectation: T
                     partial = controlled['partial_write']['rows'][0]
                     known_refs = [{key: row['record_ref'][key] for key in ('source_sha256', 'ordinal', 'raw_sha256')} for row in valid]
                     if partial not in known_refs: raise ValueError('controlled partial row not present in canonical input identities')
+                    if len(entries) == 1 and entries[0]['transaction'] is not None:
+                        tx = entries[0]['transaction']
+                        if (tx['sqlstate'] != '22012' or tx['statement_sha256'] != controlled['trigger_statement_sha256']
+                                or tx['error_class'] != controlled['injected_error_class']):
+                            raise ValueError('failed-load error does not match actual controlled SELECT 1/0 boundary')
                 if len(entries) != 1 or _effect(entries[0], failed, expectation, failed_load=True)['status'] != 'observed':
                     base['missing'].append('failed_load_durable_absence')
         if item['issues']:

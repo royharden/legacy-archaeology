@@ -14,8 +14,8 @@ def ingest_bytes(data: bytes, brief: str, permitted_samples: dict, *, declared_e
     source = sha256(data)
     if declared_family is not None: declared_record_type = declared_family
     declarations = {'encoding': declared_encoding, 'record_family': declared_record_type, 'numeric': declared_numeric}
-    if any(not isinstance(value, str) for value in declarations.values()):
-        raise ValueError('declarations must be text')
+    if any(not isinstance(value, str) or len(value) > 128 for value in declarations.values()):
+        raise ValueError('declarations must be bounded text of at most128 characters')
     reasons = []
     if declared_encoding.upper() != 'ASCII': reasons.append('unsupported_encoding')
     if declared_record_type != 'fixed-width': reasons.append('unsupported_record_family')

@@ -46,7 +46,9 @@ def demo(args):
                    origin='mock',uncertainty='public_development_hand_mapping')
         candidates.append(dict(id=digest(value),**value))
     generation['candidates']=candidates
-    generation['discovery']={'information_source':'public development hand mapping; not inference quality'}
+    generation['discovery']={'information_source':'public_hand_declared_test_layout',
+        'sample_artifact_sha256':batch['samples']['artifact_sha256'],
+        'sample_selection_sha256':batch['samples'].get('selection_sha256')}
     generation['filler']=layout.get('filler',[])
     generation['policy_sha256']=digest({'public_hand_layout':layout,'scope':'development-only'})
     generation['unknowns']=[]

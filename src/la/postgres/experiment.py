@@ -371,7 +371,8 @@ def target_experiment_callbacks(experiment_path, *, expected_experiment_sha256,
 
 
 def reconcile_target_experiment(experiment_path, artifacts, authority, *, expected_experiment_sha256,
-                                 dsn=None, target_config=None, authority_verifier=None):
+                                 dsn=None, target_config=None, authority_verifier=None,
+                                 previous_reconciliation_sha256=None):
     """Append one immutable read-only reconciliation record; never call any load collector."""
     snapshot = open_target_experiment(experiment_path, expected_experiment_sha256=expected_experiment_sha256)
     if type(target_config) is not TargetConfig: raise ValueError('concrete target config required')
@@ -382,7 +383,16 @@ def reconcile_target_experiment(experiment_path, artifacts, authority, *, expect
     if candidate.descriptor != manifest['candidate'] or digest(artifacts) != manifest['artifact_sha256'] or body['authority_sha256'] != manifest['authority_sha256'] or digest(authority) != manifest['authority_envelope_sha256'] or digest(target_config.public()) != manifest['target_config_sha256']:
         raise ValueError('reconciliation scope differs from captured experiment')
     prior = snapshot.observations.get('ack_prior')
-    record = {'schema_version': 1, 'kind': 'target_experiment_reconciliation',
+    if previous_reconciliation_sha256 is not None:
+        from .recovery import MAX_RECOVERY_RECORDS, open_target_reconciliation
+        previous = open_target_reconciliation(experiment_path, artifacts, authority,
+            expected_experiment_sha256=expected_experiment_sha256,
+            expected_reconciliation_sha256=previous_reconciliation_sha256,
+            expected_prior_observation_sha256=prior['observation_sha256'] if prior else None,
+            target_config=target_config, authority_verifier=authority_verifier)
+        if len(previous.records) >= MAX_RECOVERY_RECORDS: raise ValueError('recovery chain record limit')
+    record = {'schema_version': 2, 'kind': 'target_experiment_reconciliation',
+              'previous_reconciliation_sha256': previous_reconciliation_sha256,
               'parent_experiment_sha256': expected_experiment_sha256,
               'candidate_sha256': candidate.descriptor['candidate_sha256'],
               'authority_sha256': body['authority_sha256'], 'target_config_sha256': digest(target_config.public()),

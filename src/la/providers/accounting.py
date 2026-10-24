@@ -130,6 +130,8 @@ class CallLedger:
 
     def reconcile(self, attempt_id, *, actual_cost_usd, authority, evidence_sha256, expected_receipt_sha256):
         """Explicit operator billing reconciliation; never resets request counts."""
+        from la.contracts.protocol import integer,text,identity
+        integer(attempt_id,1,2**63-1); text(authority,256); identity(expected_receipt_sha256)
         cost = amount(actual_cost_usd)
         if not authority or not isinstance(evidence_sha256, str) or len(evidence_sha256) != 64 or any(c not in '0123456789abcdef' for c in evidence_sha256):
             raise ValueError('reconciliation authority and billing evidence hash required')

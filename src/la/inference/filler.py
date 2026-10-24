@@ -2,7 +2,7 @@
 from copy import deepcopy
 from la.contracts import digest, validate_batch, validate_generation
 from la.contracts.evidence import validate_discovery_metadata
-from la.ingest.evidence import make_evidence, verify_records
+from la.ingest.evidence import authorized_spans, make_evidence, verify_records
 
 
 def declare_filler(batch: dict, generation: dict, spans: list[dict], *, actor: str, reason: str) -> dict:
@@ -36,9 +36,10 @@ def declare_filler(batch: dict, generation: dict, spans: list[dict], *, actor: s
     if any(left['end'] > right['start'] for left, right in zip(checked, checked[1:])):
         raise ValueError('filler spans overlap')
     evidence = []
+    selection = authorized_spans(batch)
     for span in checked:
         seen = set()
-        for sample in batch['samples'].get('authorized_spans', []):
+        for sample in selection:
             ordinal = sample['ordinal']
             if (ordinal not in seen and sample['start'] <= span['start'] and span['end'] <= sample['end']
                     and batch['records'][ordinal]['disposition'] == 'eligible'):

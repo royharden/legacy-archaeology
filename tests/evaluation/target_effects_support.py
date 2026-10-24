@@ -78,6 +78,10 @@ def observations(expected):
         'injected_error_class': 'SyntheticControlledFailure', 'partial_write': {
             'connection_id': failed['attempt']['write_connection_id'], 'query_sha256': digest('partial-row-query'),
             'rows': [partial], 'rows_sha256': digest([partial])}}
+    failed['negative_effects'][0]['transaction'].update(sqlstate='22012',
+        statement_sha256=failed['controlled_fault']['trigger_statement_sha256'],
+        error_class=failed['controlled_fault']['injected_error_class'])
+    seal(failed['negative_effects'][0], 'effect_sha256')
     seal(failed, 'observation_sha256')
     prior = deepcopy(positive)
     prior.update(commit_state='indeterminate', readback=None, negative_effects=[])

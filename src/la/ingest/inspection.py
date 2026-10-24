@@ -1,7 +1,7 @@
 """Bounded diagnostic byte views. These are not decoded rows or access-control proof."""
 from collections import defaultdict
 from la.contracts import MappingSpec, digest, validate_batch, validate_generation
-from .evidence import REF_KEYS, resolve_evidence, verify_records
+from .evidence import REF_KEYS, authorized_spans, resolve_evidence, verify_records
 from .observed import MAX_OBSERVED_INTEGER
 
 MAX_PAGE = 100
@@ -74,9 +74,8 @@ def _prepare(batch, authorized_only, generation, mapping):
     allowed = defaultdict(list)
     if authorized_only:
         samples = batch['samples']
-        selected = samples.get('authorized_spans', [])
+        selected = authorized_spans(batch)
         if (not isinstance(selected, list) or len(selected) > MAX_AUTH_SPANS
-                or digest(selected) != samples.get('selection_sha256')
                 or not samples.get('authorization') and not (materialized == 0 and intake.get('stream_observation'))):
             raise ValueError('bounded hash-bound permitted selection required')
         total_bytes, ordinals = 0, set()

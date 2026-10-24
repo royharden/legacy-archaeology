@@ -553,6 +553,24 @@ def replay_archive(store: CaptureStore, manifest_ref: dict, oracle: list[dict], 
                 or not any(event['event_sha256'] == retirement.get('registry_event_sha256') for event in retirement_events)
                 or manifest.get('freeze_sha256') != state['freeze']['freeze_sha256']):
             raise ValueError('retirement journal/frozen attempt does not bind this replay')
+    results = rescore_captured_manifest(store, manifest_ref, oracle)
+    replay = {'schema_version': 1, 'mode': 'replay', 'edition': manifest['edition'],
+              'manifest': manifest_ref, 'results': results,
+              'stochastic_model_rerun': False, 'fresh_holdout': False,
+              'target_validation': 'not_run', 'product_acceptance': 'pending'}
+    return {**replay, 'replay_capture': store.put('replay_receipt', replay)}
+
+
+def rescore_captured_manifest(store, manifest_ref: dict, oracle: list[dict]) -> list[dict]:
+    """Pure captured-output rescoring; admission belongs to replay/archive callers.
+
+    No provider/target execution and no archived code import. A duck-typed
+    read-only capture view permits portable signed archives without a new DB.
+    """
+    manifest = store.get(manifest_ref, kind='variant_manifest')
+    if (len(manifest['results']) != len(ARMS) or
+            {item['method'] for item in manifest['results']} != set(ARMS)):
+        raise ValueError('replay must preserve all five original arms, including failures')
     if digest(oracle) != manifest['oracle_commitment_sha256']:
         raise ValueError('replay oracle differs from sealed corpus')
     results = []
@@ -573,8 +591,4 @@ def replay_archive(store: CaptureStore, manifest_ref: dict, oracle: list[dict], 
             rescored = score(oracle, [], edition=manifest['edition'])
         results.append({'method': result['method'], 'original_status': result['status'],
                         'score': rescored, 'original_receipt': result['receipt_capture']})
-    replay = {'schema_version': 1, 'mode': 'replay', 'edition': manifest['edition'],
-              'manifest': manifest_ref, 'results': results,
-              'stochastic_model_rerun': False, 'fresh_holdout': False,
-              'target_validation': 'not_run', 'product_acceptance': 'pending'}
-    return {**replay, 'replay_capture': store.put('replay_receipt', replay)}
+    return results

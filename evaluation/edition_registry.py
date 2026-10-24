@@ -79,7 +79,8 @@ class EditionRegistry:
         events = self.events()
         return events[-1]['event_sha256'] if events else None
 
-    def _state(self, events: list[dict], edition: str) -> dict:
+    @staticmethod
+    def _state(events: list[dict], edition: str) -> dict:
         state = {'commitment': None, 'freeze': None, 'exposed': False, 'retired': False, 'attempt': None, 't1': None}
         for event in events:
             if event['edition'] != edition:
@@ -162,6 +163,33 @@ class EditionRegistry:
 
     def state(self, edition: str) -> dict:
         return self._state(self.events(), edition)
+
+    @staticmethod
+    def snapshot_state(events: list[dict], *, edition: str) -> dict:
+        """Fold an explicitly signed exported history, without opening a journal.
+
+        Edition-local sequence gaps can represent other editions; the supplied
+        archive release must bind the exact snapshot and global registry head.
+        Content validation alone does not authenticate a retirement decision.
+        """
+        if not isinstance(events, list) or len(events) > 10000:
+            raise ValueError('bounded edition history required')
+        previous = None
+        for event in events:
+            closed(event, {'schema_version', 'sequence', 'previous_sha256', 'edition', 'event_type',
+                          'request_id', 'request_sha256', 'payload', 'event_sha256'}, 'exported event')
+            if (type(event['schema_version']) is not int or event['schema_version'] != 1
+                    or event['edition'] != edition or type(event['sequence']) is not int or event['sequence'] < 1
+                    or event['event_sha256'] != digest({k: v for k, v in event.items() if k != 'event_sha256'})
+                    or event['request_sha256'] != digest({k: event[k] for k in ('edition', 'event_type', 'payload')})):
+                raise ValueError('invalid exported edition event')
+            if previous is not None and (event['sequence'] <= previous['sequence'] or
+                    (event['sequence'] == previous['sequence'] + 1 and event['previous_sha256'] != previous['event_sha256'])):
+                raise ValueError('reordered/broken exported edition history')
+            if event['previous_sha256'] is not None and not is_sha(event['previous_sha256']):
+                raise ValueError('invalid prior event hash')
+            previous = event
+        return EditionRegistry._state(events, edition)
 
     def _append(self, edition: str, kind: str, payload: dict, *, request_id: str,
                 expected_head: str | None) -> JournalReceipt:

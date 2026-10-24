@@ -3,14 +3,65 @@ import argparse
 from pathlib import Path
 
 
-def captured(store,reference,kind):
+def captured(store,reference,kind,*,budget=None):
     from la.app.artifacts import within
     from la.app.storage import bounded_bytes
     from evaluation.artifacts import is_sha
-    if type(reference) is not dict or not is_sha(reference.get('sha256')) or reference.get('kind')!=kind:
+    if (type(reference) is not dict or set(reference)-{'sha256','kind','bytes'} or
+            not is_sha(reference.get('sha256')) or reference.get('kind')!=kind):
         raise ValueError('explicit typed immutable capture reference required')
-    bounded_bytes(within(store.root,reference['sha256']+'.json',exists=True),limit=32*1024*1024)
+    data=bounded_bytes(within(store.root,reference['sha256']+'.json',exists=True),limit=32*1024*1024)
+    if 'bytes' in reference and (type(reference['bytes']) is not int or reference['bytes']!=len(data)):
+        raise ValueError('capture byte declaration differs from actual immutable member')
+    if budget is not None:
+        budget['bytes']+=len(data); budget['members']+=1
+        if budget['bytes']>256*1024*1024 or budget['members']>1024:
+            raise ValueError('capture graph exceeds bounded local read budget')
     return store.get(reference,kind=kind)
+
+
+def target_batch_captures(store,batch):
+    """Accept actual legacy/current target-arm wires, including partial failures."""
+    tr=batch['receipt_capture']; kind=tr['kind']
+    if kind not in ('target_arm_receipt','target_arm_failure'):
+        raise ValueError('actual independent target receipt required')
+    if captured(store,tr,kind)!={k:v for k,v in batch.items() if k!='receipt_capture'}:
+        raise ValueError('target receipt content mismatch')
+    version=batch.get('schema_version')
+    if type(version) is not int or version not in (1,2): raise ValueError('unknown target-arm payload version')
+    if version==2:
+        stages=batch['stages']
+        allowed={'not_run','not_configured','not_authorized','missing','unavailable','returned','captured','partial'}
+        if type(stages) is not dict or set(stages)!={'observe','failed_load','recovery'} or any(v not in allowed for v in stages.values()):
+            raise ValueError('closed target stage states required')
+        errors=batch['stage_errors']
+        if type(errors) is not list or len(errors)>3: raise ValueError('bounded target stage errors required')
+        for error in errors:
+            if (type(error) is not dict or set(error)!={'stage','error_type'} or error['stage'] not in stages
+                    or type(error['error_type']) is not str or len(error['error_type'])>256 or not error['error_type'].isidentifier()):
+                raise ValueError('target stage errors may contain class identifiers only')
+        phase=batch['phase_scope']
+        if phase is not None:
+            if type(phase) is not dict or set(phase)!={'evaluation_phase','split','evaluation_plan_sha256','freeze_sha256'}:
+                raise ValueError('closed retained target phase scope required')
+    normal=batch.get('observation')
+    if normal is not None:
+        if normal['kind'] not in ('target_observation_v2','target_observation_v3'):
+            raise ValueError('observation reference must preserve actual wire version')
+        observed=captured(store,normal,normal['kind'])
+        if observed['schema_version']!=int(normal['kind'][-1]): raise ValueError('observation capture kind/version mismatch')
+        if kind=='target_arm_receipt' and version==2 and observed['schema_version']!=batch['observation_schema_version']:
+            raise ValueError('target-arm observation version differs from actual capture')
+    elif kind=='target_arm_receipt' and version==2 and batch['observation_schema_version'] is not None:
+        raise ValueError('missing observation cannot claim a wire version')
+    effects=batch.get('effect_captures',[])
+    if type(effects) is not list or len(effects)>3: raise ValueError('bounded retained target-effect references required')
+    for effect in effects:
+        if effect['kind'] not in ('failed_load_observation','unknown_commit_observation','recovery_observation'):
+            raise ValueError('unknown target-effect capture')
+        observed=captured(store,effect,effect['kind'])
+        if type(observed.get('schema_version')) is not int or observed['schema_version'] not in (2,3):
+            raise ValueError('actual versioned effect observation required')
 
 
 def rows_from_suite(store,reference,*,replays=()):
@@ -79,17 +130,7 @@ def rows_from_suite(store,reference,*,replays=()):
                      else 'not_run' if not states or all(s=='not_run' for s in states) else 'indeterminate')
             if derived!=target['target_validation']: raise ValueError('target status omitted failed/unknown batches')
             for batch in batches:
-                tr=batch['receipt_capture']; kind=tr['kind']
-                if kind not in ('target_arm_receipt','target_arm_failure'):
-                    raise ValueError('actual independent target receipt required')
-                if captured(store,tr,kind)!={k:v for k,v in batch.items() if k!='receipt_capture'}:
-                    raise ValueError('target receipt content mismatch')
-                if kind=='target_arm_receipt':
-                    captured(store,batch['observation'],'target_observation_v2')
-                    for effect in batch['effect_captures']:
-                        if effect['kind'] not in ('failed_load_observation','unknown_commit_observation','recovery_observation'):
-                            raise ValueError('unknown target-effect capture')
-                        captured(store,effect,effect['kind'])
+                target_batch_captures(store,batch)
             replay_arm=None
             if replay_record:
                 item=next(r for r in replay['results'] if r['method']==arm['method'])

@@ -232,6 +232,12 @@ def _intake(value):
     else:
         required.update(final_record_width_valid=BOOL, final_record_eligible=BOOL)
     _shape(required)(value)
+    for separator_value in value['separators']:
+        if len(separator_value['raw_hex']) != 2 * separator_value['length']:
+            _fail('separator byte length mismatch')
+    descriptor = value['framing_policy']
+    if descriptor['width_candidates'] != value['width_candidates'] or descriptor['terminal_newline'] != value['terminal_newline']:
+        _fail('intake descriptor copies differ')
     observed, materialized, unmaterialized = (value[key] for key in ('observed_record_count', 'materialized_record_count', 'unmaterialized_record_count'))
     if observed is None:
         if not stream or unmaterialized is not None or materialized != 0:
@@ -255,10 +261,10 @@ def _intake(value):
 def _sample_metadata(value):
     if type(value) is not dict:
         _fail()
-    common = {'authorization': _text(1000), 'artifact_sha256': HASH_NULL,
+    common = {'authorization': _text(1000), 'artifact_sha256': _hash,
               'records': _array(_record_display, 64), 'selected_ordinals': _array(ROW, 64), 'truncated': BOOL}
     if value.get('selection_policy') == 'no_stream_refusal_authority':
-        required = dict(common, content_sha256=HASH_NULL, artifact_received=BOOL,
+        required = dict(common, artifact_sha256=HASH_NULL, content_sha256=HASH_NULL, artifact_received=BOOL,
                         validation_status=_enum('unvalidated_without_source_bytes', 'not_provided'),
                         record_references_validated=_enum(False), authorized_spans=_array(_selected, 0),
                         selected_artifact_indices=_array(ROW, 0), selected_byte_count=_enum(0), authorized_count=_enum(0),
@@ -266,9 +272,14 @@ def _sample_metadata(value):
         _shape(required, {'intake': _intake})(value)
         if value['records'] or value['selected_ordinals'] or value['authorization'] or value['truncated']:
             _fail('observed sample pins convey no authority')
+        received = value['artifact_received']
+        if (value['validation_status'] != ('unvalidated_without_source_bytes' if received else 'not_provided')
+                or (value['artifact_sha256'] is not None) != received
+                or (value['content_sha256'] is not None) != received):
+            _fail('observed sample pin presence mismatch')
         _self_selection(value)
     elif 'authorized_spans' in value:
-        required = dict(common, content_sha256=HASH_NULL, authorized_spans=_array(_selected, 10000),
+        required = dict(common, content_sha256=_hash, authorized_spans=_array(_selected, 10000),
                         selected_artifact_indices=_array(ROW, 10000), authorized_count=COUNT,
                         selected_byte_count=_integer(0, 16384), selection_policy=_enum('ordinal-span-v1'), selection_sha256=_hash)
         _shape(required, {'intake': _intake})(value)

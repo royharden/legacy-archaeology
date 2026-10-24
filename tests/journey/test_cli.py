@@ -44,7 +44,10 @@ class CliJourneyTests(unittest.TestCase):
             candidates.append(dict(value,id=digest(value)))
         generation = dict(schema_version=1, source_sha256=batch['source_sha256'], framing_sha256=batch['framing_sha256'],
             brief_sha256=batch['brief_sha256'], policy_sha256=digest('explicit test-only policies'),
-            candidates=candidates, unknowns=[], mode='mock', filler=[], discovery={'provenance':'hand authored test'})
+            candidates=candidates, unknowns=[], mode='mock', filler=[], discovery={
+                'information_source':'public_hand_declared_test_layout',
+                'sample_artifact_sha256':batch['samples']['artifact_sha256'],
+                'sample_selection_sha256':batch['samples'].get('selection_sha256')})
         generation['generation_sha256'] = digest(generation)
         immutable(self.run/('generation-'+generation['generation_sha256']+'.json'),generation)
         pointer(self.run/'current-generation.json',{'generation_sha256':generation['generation_sha256']})

@@ -48,7 +48,7 @@ def factory(context):
     from la.contracts import digest
     if type(context) is not dict or set(context)!={'root','public_trust_root','public_trust_profile','grants','dsn_env'}:
         raise ValueError('closed evaluator-owned target context required; no oracle/provider secrets')
-    root=Path(context['root']).resolve(strict=True)
+    root=Path(context['root']).absolute(); root.resolve(strict=True)
     index=read(within(root,context['grants'],exists=True))
     if type(index) is not dict or not 1<=len(index)<=1024:
         raise ValueError('bounded explicit target-grant index required')
@@ -57,38 +57,71 @@ def factory(context):
     keys=public_keys(context['public_trust_root'],context['public_trust_profile'])
     verifier=TargetAuthorityVerifier(*keys)
     evaluator_verifier=ReceiptVerifier(*keys)
-    loaded={}
+    loaded={}; experiments={}
 
     def load(artifact):
         descriptor=artifact['descriptor']; key=descriptor['candidate_sha256']
         if key in loaded: return loaded[key]
         entry=index.get(key)
         required={'signed_authority','target_config','expectation'}
-        optional={'failed_load','prior','reconciled','collect_failed_load','collect_lost_ack'}
+        optional={'failed_load','prior','reconciled','collect_failed_load','collect_lost_ack','experiment'}
         if type(entry) is not dict or not required<=set(entry) or set(entry)-required-optional:
             raise ValueError('no exact separately approved target-grant entry')
         for flag in ('collect_failed_load','collect_lost_ack'):
             if flag in entry and type(entry[flag]) is not bool: raise ValueError('explicit collector selection required')
         if (entry.get('collect_failed_load') and entry.get('failed_load')) or (entry.get('collect_lost_ack') and (entry.get('prior') or entry.get('reconciled'))):
             raise ValueError('choose actual stored effects or explicitly authorized collectors')
+        if 'experiment' in entry and any(entry.get(k) for k in ('failed_load','prior','reconciled','collect_failed_load','collect_lost_ack')):
+            raise ValueError('pinned experiment callbacks cannot mix with other effects or new collection')
         signed=read(within(root,entry['signed_authority'],exists=True))
         intent=verifier.verify(signed)
         config=TargetConfig(**read(within(root,entry['target_config'],exists=True))).validate()
         if config.expected_bundle_sha256 is not None:
             raise ValueError('evaluation target cannot borrow a product bundle pin')
+        if (config.authority_reference!=intent['authority_sha256'] or
+                config.expected_candidate_sha256 is not None and config.expected_candidate_sha256!=descriptor['candidate_sha256']):
+            raise ValueError('configured external authority/candidate pin contradicts exact grant')
         for key,pin in (('source_sha256',config.expected_source_sha256),('mapping_sha256',config.expected_mapping_sha256)):
             if pin is not None and pin!=descriptor[key]: raise ValueError('configured target pin contradicts evaluation candidate')
-        prepared=resolve_candidate(artifact,config)
         operations=['load','negative_probes','reconcile']
         if entry.get('collect_failed_load'): operations.append('controlled_failed_load')
         if entry.get('collect_lost_ack'): operations.append('controlled_commit_ack')
-        for operation in operations: verify_authority(intent,prepared,config,operation)
+        if 'experiment' not in entry:
+            prepared=resolve_candidate(artifact,config)
+            for operation in operations: verify_authority(intent,prepared,config,operation)
         expected=read(within(root,entry['expectation'],exists=True))
         if 'required_negatives' in expected: expected['required_negatives']=tuple(expected['required_negatives'])
         expectation=TargetExpectation(**expected).validate()
         grant=TargetGrant(signed,expectation,evaluator_verifier).validate()
         if expectation.candidate!=descriptor or expectation.target_config_sha256!=digest(config.public()):
             raise ValueError('externally configured target expectation differs from actual candidate/config')
+        if 'experiment' in entry:
+            from la.postgres import target_experiment_callbacks
+            packet=entry['experiment']
+            required_packet={'path','expected_experiment_sha256'}
+            later_keys={'expected_reconciliation_sha256','expected_prior_observation_sha256'}
+            if type(packet) is not dict or set(packet) not in (required_packet,required_packet|later_keys):
+                raise ValueError('closed externally pinned experiment reference required')
+            within(root,packet['path'],exists=True)
+            original_path=root/packet['path']
+            if later_keys<=set(packet):
+                from la.postgres import target_reconciliation_callbacks
+                callbacks=target_reconciliation_callbacks(original_path,artifact,signed,
+                    expected_experiment_sha256=packet['expected_experiment_sha256'],
+                    expected_reconciliation_sha256=packet['expected_reconciliation_sha256'],
+                    expected_prior_observation_sha256=packet['expected_prior_observation_sha256'],
+                    target_config=config,authority_verifier=verifier)
+                archived=callbacks.snapshot.experiment.manifest
+            else:
+                callbacks=target_experiment_callbacks(original_path,
+                    expected_experiment_sha256=packet['expected_experiment_sha256'],
+                    expected_candidate_sha256=descriptor['candidate_sha256'],expected_authority_sha256=intent['authority_sha256'])
+                archived=callbacks.snapshot.manifest
+            if (archived['target_config_sha256']!=digest(config.public()) or archived['candidate']!=descriptor
+                    or archived['artifact_sha256']!=digest(artifact) or archived['authority_envelope_sha256']!=digest(signed)
+                    or archived['observer_code_sha256']!=expectation.observer_code_sha256):
+                raise ValueError('experiment target config differs from actual grant')
+            experiments[descriptor['candidate_sha256']]=callbacks
         loaded[key]=(entry,signed,intent,config,grant)
         return loaded[key]
 
@@ -103,6 +136,8 @@ def factory(context):
     def observe(artifact,intent):
         entry,signed,verified,config,approved=load(artifact)
         if intent!=signed: raise ValueError('target authority changed after grant')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].observe(artifact,signed)
         # Only after real signature + exact candidate/config checks can DSN be read.
         dsn=target_dsn(context['dsn_env'],config)
         return target_observer_v2(artifact,signed,dsn=dsn,target_config=config,
@@ -111,6 +146,8 @@ def factory(context):
     def failed_load(artifact,intent):
         entry,signed,verified,config,_=load(artifact)
         if intent!=signed: raise ValueError('failed-load authority changed')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].failed_load(artifact,signed)
         if entry.get('collect_failed_load'):
             return collect_controlled_failed_load(artifact,signed,dsn=target_dsn(context['dsn_env'],config),
                 target_config=config,authority_verifier=verifier)
@@ -119,6 +156,8 @@ def factory(context):
     def recovery(artifact,intent):
         entry,signed,verified,config,_=load(artifact)
         if intent!=signed: raise ValueError('recovery authority changed')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].recovery(artifact,signed)
         if entry.get('collect_lost_ack'):
             return collect_controlled_lost_ack(artifact,signed,dsn=target_dsn(context['dsn_env'],config),
                 target_config=config,authority_verifier=verifier)

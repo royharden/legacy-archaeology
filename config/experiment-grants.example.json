@@ -1,0 +1,13 @@
+{
+  "REPLACE_WITH_EXACT_CANDIDATE_SHA256": {
+    "signed_authority": "operator/signed-target-authority.json",
+    "target_config": "operator/disposable-target-config.json",
+    "expectation": "operator/independent-target-expectation.json",
+    "experiment": {
+      "path": "target-captures/EXACT_EXPERIMENT_ID",
+      "expected_experiment_sha256": "REPLACE_WITH_EXTERNAL_EXPERIMENT_SHA256",
+      "expected_reconciliation_sha256": "REPLACE_WITH_EXPLICIT_LATER_RECORD_SHA256",
+      "expected_prior_observation_sha256": "REPLACE_WITH_EXACT_ORIGINAL_PRIOR_SHA256_OR_NULL_IF_ABSENT"
+    }
+  }
+}

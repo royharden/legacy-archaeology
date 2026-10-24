@@ -61,3 +61,5 @@ unknown liability. Actual operator reconciliation is required in both ledgers;
 the publisher never substitutes local provider cost into an immutable unknown
 evaluator attempt or rewrites old captures. New receipts/reports must retain
 explicit lineage and supersession.
+
+Capture adapters additionally accept D6 target-arm payload schema2, nullable normal observations, exact v2/v3 observation capture kinds and retained effect captures in failures. No stage failure is dropped, no v3 payload is downgraded, and no missing normal observation is fabricated. D6's separate portable archive signed-release and approved_projection caller is scripts/archive.py; source interfaces are reconciled against the actual owner exports before its package handoff. The independent existing-store replay path is scripts/replay.py and never creates a fresh unseen run or reruns a target/model.

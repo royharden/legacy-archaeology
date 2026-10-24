@@ -1,4 +1,5 @@
 """Exact source evidence and fail-closed permitted-sample authorization."""
+from copy import deepcopy
 from la.contracts import digest, sha256
 from la.contracts.evidence import (validate_sample_artifact, validate_sample_metadata,
                                    validate_intake_metadata, validate_span_evidence)
@@ -51,6 +52,59 @@ def verify_records(batch: dict, source: bytes | None = None) -> None:
             retained.extend(raw); retained.extend(ending)
         if not intake['bounded_refusal'] and sha256(bytes(retained)) != batch['source_sha256']:
             raise ValueError('retained bytes do not reconstruct source')
+    _checked_selection(batch)
+
+
+def _checked_selection(batch: dict) -> list[dict]:
+    """Resolve supplied permission metadata without rewriting a legacy batch.
+
+    The legacy five-field result explicitly permits whole retained records. Its
+    absence of a modern selection hash must never be filled into the hashed
+    wire object. Current metadata always uses its supplied span selection.
+    """
+    samples = batch['samples']
+    records = batch['records']
+    for sample in samples['records']:
+        ordinal = sample['ordinal']
+        if ordinal >= len(records) or sample != records[ordinal]:
+            raise ValueError('permitted whole record does not resolve to retained source')
+    if 'authorized_spans' in samples:
+        selected = samples['authorized_spans']
+    else:
+        if samples['selected_ordinals'] != [record['ordinal'] for record in samples['records']]:
+            raise ValueError('legacy selected ordinals do not match permitted records')
+        if len(set(samples['selected_ordinals'])) != len(samples['selected_ordinals']):
+            raise ValueError('duplicate legacy permitted record')
+        # Historical metadata did not retain original artifact indices. A view
+        # must not invent them from positions in the selected-record list.
+        selected = [dict(ordinal=record['ordinal'], start=0, end=record['length'],
+                         raw_hex=record['raw_hex'], raw_sha256=record['raw_sha256'])
+                    for record in samples['records']]
+    if selected and not samples['authorization'].strip():
+        raise ValueError('explicit authorization required for permitted spans')
+    total = 0
+    for item in selected:
+        ordinal, start, end = item['ordinal'], item['start'], item['end']
+        if ordinal >= len(records) or not 0 <= start < end <= records[ordinal]['length']:
+            raise ValueError('permitted span does not resolve to retained record')
+        raw = bytes.fromhex(records[ordinal]['raw_hex'])[start:end]
+        if raw.hex() != item['raw_hex'] or sha256(raw) != item['raw_sha256']:
+            raise ValueError('permitted span bytes do not resolve to retained source')
+        total += end - start
+    if total > 16384 or len({item['ordinal'] for item in selected}) > 64:
+        raise ValueError('permitted selection exceeds evidence bounds')
+    if 'authorized_spans' in samples:
+        for record in samples['records']:
+            if not any(item['ordinal'] == record['ordinal'] and item['start'] == 0
+                       and item['end'] == record['length'] for item in selected):
+                raise ValueError('whole sample is outside current span authorization')
+    return selected
+
+
+def authorized_spans(batch: dict) -> list[dict]:
+    """Verified current or legacy selection view; no inserted wire/hash fields."""
+    verify_records(batch)
+    return deepcopy(_checked_selection(batch))
 
 
 def resolve_evidence(batch: dict, evidence: dict, *, source: bytes | None = None, require_authorized=False) -> bytes:
@@ -74,9 +128,7 @@ def resolve_evidence(batch: dict, evidence: dict, *, source: bytes | None = None
                 or any(type(ref.get(key)) is not int for key in ('ordinal', 'byte_start', 'length'))):
             raise ValueError('evidence record reference mismatch')
     if require_authorized:
-        selected = batch['samples'].get('authorized_spans', [])
-        if digest(selected) != batch['samples'].get('selection_sha256'):
-            raise ValueError('permitted selection identity mismatch')
+        selected = _checked_selection(batch)
         matches = [item for item in selected if item['ordinal'] == ordinal and item['start'] <= start and end <= item['end']]
         if not matches: raise ValueError('evidence outside permitted sample spans')
         for item in matches:

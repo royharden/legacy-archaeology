@@ -343,7 +343,8 @@ class DisposablePostgres(unittest.TestCase):
         self.assertEqual(result['target_validation'], 'passed')
 
     def test_experiment_repeated_actual_reconciliation_preserves_original_and_never_loads(self):
-        from la.postgres import collect_target_experiment, open_target_experiment, reconcile_target_experiment
+        from la.postgres import (collect_target_experiment, open_target_experiment, reconcile_target_experiment,
+                                 target_experiment_callbacks, target_reconciliation_callbacks)
         artifact, authority, config, verifier = self.controlled_inputs()
         # Fail only the later recovery call, after the actual predecessor is durable.
         with patch('la.postgres.experiment.reconcile_target_candidate', side_effect=OSError('controlled observer outage')):
@@ -373,9 +374,12 @@ class DisposablePostgres(unittest.TestCase):
             def cursor(self, *args, **kwargs): return ReadOnlyCursor(self.connection.cursor(*args, **kwargs))
         with patch('la.postgres.experiment.target_observer_v2', side_effect=AssertionError('never reload')), \
              patch('la.postgres.runner.driver_and_connect', return_value=(driver, ReadOnlyConnection)):
-            records = [reconcile_target_experiment(root, artifact, authority,
-                expected_experiment_sha256=manifest['experiment_sha256'], dsn=self.dsn,
-                target_config=config, authority_verifier=verifier) for _ in range(2)]
+            records = []
+            for _ in range(2):
+                records.append(reconcile_target_experiment(root, artifact, authority,
+                    expected_experiment_sha256=manifest['experiment_sha256'], dsn=self.dsn,
+                    target_config=config, authority_verifier=verifier,
+                    previous_reconciliation_sha256=records[-1]['reconciliation_sha256'] if records else None))
         self.assertTrue(statements)
         self.assertEqual((root / 'experiment.json').read_bytes(), original)
         self.assertNotEqual(records[0]['capture']['attempt_id'], records[1]['capture']['attempt_id'])
@@ -384,3 +388,29 @@ class DisposablePostgres(unittest.TestCase):
             self.assertEqual(record['capture']['namespace'], prior['attempt']['namespace'])
             self.assertEqual(record['prior_observation_sha256'], prior['observation_sha256'])
             self.assertEqual(record['capture']['execution_id'], prior['attempt']['execution_id'])
+        original_callbacks = target_experiment_callbacks(root, expected_experiment_sha256=manifest['experiment_sha256'])
+        self.assertIsNone(original_callbacks.recovery(artifact, authority)['reconciled'])
+        with patch('la.postgres.runner.driver_and_connect', side_effect=AssertionError('offline reader cannot connect')):
+            selected = target_reconciliation_callbacks(root, artifact, authority,
+                expected_experiment_sha256=manifest['experiment_sha256'],
+                expected_reconciliation_sha256=records[-1]['reconciliation_sha256'],
+                expected_prior_observation_sha256=prior['observation_sha256'],
+                target_config=config, authority_verifier=verifier)
+        self.assertEqual(len(selected.projection()['history']), 2)
+        self.assertEqual(selected.projection()['source_label'], 'controlled_application_ack_suppression')
+        from la.review import digest
+        from evaluation.target_effects import TargetExpectation, grade_target
+        from evaluation.target_runner import TargetPorts
+        from postgres.test_target_experiment import declared_columns, declared_oracle
+        from la.postgres.target import inspect_target
+        _, connect = driver_and_connect(self.dsn, config)
+        with connect() as connection: target = inspect_target(connection, config)
+        expectation = TargetExpectation(artifact['descriptor'], authority['payload']['authority_sha256'], digest(config.public()),
+                                       manifest['observer_code_sha256'], target, declared_columns())
+        ports = TargetPorts(lambda *args: artifact, lambda *args: None, selected.observe, selected.failed_load, selected.recovery)
+        pair = ports.recovery(artifact, authority)
+        grade = grade_target(declared_oracle(self.batch), ports.observe(artifact, authority), expectation=expectation,
+            failed_load=ports.failed_load(artifact, authority), prior=pair['prior'], recovery_observation=pair['reconciled'])
+        self.assertEqual(grade['target_validation'], 'passed')
+        self.assertEqual(grade['product_acceptance'], 'pending')
+        self.assertIsNone(original_callbacks.recovery(artifact, authority)['reconciled'])

@@ -23,9 +23,9 @@ def sha256(value: bytes) -> str:
 class RecordRef(Boundary):
     source_sha256: str
     framing_sha256: str
-    ordinal: int = Field(ge=0)
-    byte_start: int = Field(ge=0)
-    length: int = Field(ge=0)
+    ordinal: int = Field(ge=0,le=9999)
+    byte_start: int = Field(ge=0,le=5*1024*1024)
+    length: int = Field(ge=0,le=5*1024*1024)
     raw_sha256: str
     raw_hex: str
     disposition: Literal['eligible', 'quarantined']
@@ -133,9 +133,9 @@ class MappingSpec(Boundary):
 class OutcomeRef(Boundary):
     source_sha256: str
     framing_sha256: str
-    ordinal: int = Field(ge=0)
-    byte_start: int = Field(ge=0)
-    length: int = Field(ge=0)
+    ordinal: int = Field(ge=0,le=9999)
+    byte_start: int = Field(ge=0,le=5*1024*1024)
+    length: int = Field(ge=0,le=5*1024*1024)
     raw_sha256: str
 
 class RowOutcome(Boundary):
@@ -226,6 +226,23 @@ class MigrationBundle(Boundary):
     target_validation: Literal['not_run','passed','failed','indeterminate']
     row_parity: Literal['not_run','exact','mismatch','incomplete']
     bundle_sha256: str
+
+    @field_validator('files',mode='before')
+    @classmethod
+    def member_pins(cls,value):
+        closed(value,{'mapping.json','source.json','schema.sql','migrate.sql','rows.jsonl',
+                      'unresolved.jsonl','quarantine.jsonl','approval.json'}, {'rulings.json','inputs.json','LOAD.md'})
+        for pin in value.values(): identity(pin)
+        return value
+
+    @field_validator('columns',mode='before')
+    @classmethod
+    def column_names(cls,value):
+        allowed={'source_sha256','ordinal','raw_sha256',*REQUIRED_FIELDS}
+        if (type(value) is not list or len(value)>8 or any(type(column) is not str for column in value)
+                or len(value)!=len(set(value)) or any(column not in allowed for column in value)):
+            raise ValueError('known unique migration columns required')
+        return value
 
     @field_validator('counts',mode='before')
     @classmethod

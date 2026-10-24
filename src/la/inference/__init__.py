@@ -1,7 +1,7 @@
 """Finite byte/policy/name proposals with evidence-bound, honest coverage metadata."""
 from la.contracts import REQUIRED_FIELDS, digest, sha256, validate_batch, validate_generation
 from la.contracts.evidence import validate_discovery_metadata
-from la.ingest.evidence import make_evidence
+from la.ingest.evidence import authorized_spans, make_evidence
 from .alternatives import compatible_targets, disclosed_names, policy_alternatives, status_vocabulary
 from .discovery import discover_fields
 from .filler import declare_filler
@@ -27,6 +27,7 @@ def hypothesize(batch: dict, brief: str, mode: str = 'rules') -> dict:
     vocabulary = status_vocabulary(brief)
     names = disclosed_names(brief)
     rows = [bytes.fromhex(record['raw_hex']) for record in batch['records'] if record['disposition'] == 'eligible']
+    selection = authorized_spans(batch)
     candidates, fields, candidate_metadata = [], [], {}
     unknowns = list(discovery['abstention_reasons'])
     if batch['status'] != 'accepted' or not rows or batch['width'] is None:
@@ -36,7 +37,7 @@ def hypothesize(batch: dict, brief: str, mode: str = 'rules') -> dict:
             start, end = span['start'], span['end']
             raws = [raw[start:end] for raw in rows]
             evidence, seen_ordinals = [], set()
-            for sample in batch['samples'].get('authorized_spans', []):
+            for sample in selection:
                 ordinal = sample['ordinal']
                 if (ordinal not in seen_ordinals and sample['start'] <= start and end <= sample['end']
                         and batch['records'][ordinal]['disposition'] == 'eligible'):

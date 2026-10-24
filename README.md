@@ -10,6 +10,8 @@ contract/provider/journey cases. They have not been imported, collected or execu
 facts, signed target intent, common non-loadable evaluator targets and independent
 effect grading. No real observations or authority are supplied by the source.
 
+This wind-down checkpoint also preserves unfinished portable-archive and target-cleanup source. Their integration is incomplete. Protected T3 live billing and the proposed sample-preparation helper were not started.
+
 After the authorized environment activation phase, use Python 3.12 and install with `uv sync`. Example commands (not executed during construction):
 
 ```console
@@ -32,3 +34,7 @@ Limits: 5 MiB, 10,000 records, 256 bytes per record, 4,000-character brief, at m
 The report contains an escaped byte grid, partial typed preview, consequential offered choices, ruling history and six separate readiness dimensions. Load rows require explicit approval of the complete current mapping. Immutable bundles include actual generation/journal lineage; execution and evaluation create separate receipts. Source changes require a new run; changed interpretation/rulings invalidate dependent approval. [CLI and evaluator commands](docs/CLI.md) document the public failure walk, actual injected evaluator runners/replay, and separately authorized target execution/recovery source. Target readiness requires committed fresh readback and independent oracle/negative-effect evidence. No hidden custody, benchmark success or product acceptance is claimed. See [architecture](docs/ARCHITECTURE.md) for boundaries.
 
 Ready future evaluator caller factories and non-secret configuration shapes are documented in [config/README.md](config/README.md). [Local result publication](docs/RESULTS.md) consumes immutable captures, retains failed arms and unknown costs, and requires signed approval for active hidden projections. [Public intake teaching examples](examples/intake/README.md) explain genuine partial-span authorization and explicit unsupported declarations; they are known, hand-authored material, not benchmark output. Every command remains unexecuted during Dirty Mode.
+
+[Shared wire contracts](docs/CONTRACTS.md) name the actual owner validators and closed nested forms. Supplied-only serialization preserves legacy absent-field hashes; vendor usage remains raw and unsupported costs stay unknown. This repository is source constructed in Dirty Mode; tests, demo, providers, database effects, custody, parity and benchmark remain unexecuted/unverified here.
+
+[Capture/replay operator source](docs/CAPTURE-REPLAY.md) adds explicitly pinned experiment collection, offline inspection, read-only reconciliation and exact later-record selection. The same guide distinguishes public/retired replay from active hidden signed projections. No test/demo/provider/DB/custody/parity/benchmark operation was executed here; all runtime claims remain unverified.

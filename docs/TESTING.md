@@ -56,3 +56,5 @@ The signature fault test always rejects; it does not replace real verification
 with a passing callback or execute any crypto operation here.
 
 V7F adds future journey regression SOURCE for all-arm/split not_run templates, omitted failed arms, raw/private projection-field refusal, cached/reasoning and absent-usage categories, unknown liability vs known zero, hidden/public and replay route refusal, immutable report retry/tampering, untrusted T1 extras/changed price refusal before transport, and oracle/custody context refusal. These tests have not been imported, collected or executed. Only AST parsing and focused source review are permitted during Dirty Mode.
+
+V7G adds future strict-wire source cases across actual ingest/inference producers, unknown nested sample/intake keys, unknown observed denominators, preserved absent diagnostics, unknown question-option smuggling, bool-as-span, unknown outcome evidence, closed provider pins, unchanged cached/reasoning/future usage categories, and child-schema import topology. Actual schema definitions and test modules have not been imported or executed.

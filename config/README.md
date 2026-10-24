@@ -61,3 +61,5 @@ target authority and external expectation must match that exact descriptor.
 Product operations instead use the `la database-observe`/`database-recover`
 commands with independently supplied signed product-bundle authority/config and
 external bundle pin. Product approval is never fabricated by evaluator proposals.
+
+The inactive experiment-grants.example.json adds an exact experiment reference to the target grant index. Remove both later-recovery keys to use original captured effects. Otherwise supply the explicit selected later record SHA and exact original prior SHA (JSON null only for actually absent prior). These callbacks read pinned immutable captures without a DSN or new target action. See docs/CAPTURE-REPLAY.md for the separate collect/open/reconcile/select-recovery commands; placeholders grant nothing and deliberately fail validation.
