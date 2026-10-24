@@ -51,6 +51,8 @@ class RunnerPorts:
     # Receives only producer artifacts/authority; returns concrete committed
     # readback wire observations. Independent oracle is never passed to it.
     target_observer: Callable[[dict, dict], dict] | None = None
+    # Pure adapter preflight returns the actual transport text before liability.
+    provider_preflight: Callable[[dict], str] | None = None
 
 
 def _visible(value: dict) -> dict:
@@ -164,7 +166,14 @@ class RequestGateway:
             prompt['candidates'] = [{key: deepcopy(value) for key, value in item.items()
                                      if key in ('id', 'start', 'end', 'semantic_target', 'data_type', 'policy')}
                                     for item in candidates]
-        text = canonical(prompt).decode('utf-8')
+        request = {'mode': self.mode, 'method': self.method, 'attempt': len(self.attempts) + 1,
+                   'prompt': prompt, 'prompt_sha256': digest(prompt),
+                   'max_input_tokens': 8000, 'max_output_tokens': 2000,
+                   'allow_retries': False, 'allow_repairs': False if self.method == 'B1' else True}
+        preflight = self.ports.provider_preflight or getattr(self.ports.provider, 'preflight', None)
+        text = preflight(deepcopy(request)) if preflight else canonical(prompt).decode('utf-8')
+        if not isinstance(text, str):
+            raise ValueError('provider preflight must return exact transport text')
         if len(text.encode('utf-8')) > 32768:
             raise ValueError('prompt byte cap exceeded')
         tokens = self.ports.count_tokens(text) if self.ports.count_tokens else None
@@ -172,10 +181,6 @@ class RequestGateway:
             raise ValueError('input token cap exceeded')
         if self.mode == 'live' and (tokens is None or not is_sha(self.authority.get('spend_authority_sha256'))):
             raise ValueError('live requires token preflight and spend authority')
-        request = {'mode': self.mode, 'method': self.method, 'attempt': len(self.attempts) + 1,
-                   'prompt': prompt, 'prompt_sha256': digest(prompt),
-                   'max_input_tokens': 8000, 'max_output_tokens': 2000,
-                   'allow_retries': False, 'allow_repairs': False if self.method == 'B1' else True}
         call_id = self.meter.reserve(request, tokens) if self.meter is not None else None
         settled = False
         item = {'attempt': request['attempt'], 'prompt_sha256': request['prompt_sha256'],

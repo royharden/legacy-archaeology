@@ -7,6 +7,7 @@ operator/custody boundary. Producer success booleans are not part of this wire.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from ipaddress import ip_address
 from copy import deepcopy
 import re
 
@@ -117,10 +118,24 @@ class TargetExpectation:
             raise ValueError('product target cannot impersonate an evaluator arm')
         if any(not is_sha(pin) for pin in (self.authority_sha256, self.target_config_sha256, self.observer_code_sha256)):
             raise ValueError('separately approved target/authority/observer pins required')
-        target = closed(self.target, {'database', 'role', 'host', 'port', 'server_version_num',
-            'authority_reference', 'scope', 'driver_version'}, 'actual target')
+        target_keys = {'database', 'role', 'host', 'port', 'server_version_num',
+                       'authority_reference', 'scope', 'driver_version'}
+        forwarded = isinstance(self.target, dict) and set(self.target) == target_keys | {'connection_host', 'connection_port'}
+        target = closed(self.target, target_keys | ({'connection_host', 'connection_port'} if forwarded else set()), 'actual target')
+        connect_host = target['connection_host'] if forwarded else target['host']
+        connect_port = target['connection_port'] if forwarded else target['port']
+        if forwarded:
+            try:
+                address = ip_address(target['host'])
+            except (ValueError, TypeError) as exc:
+                raise ValueError('literal observed server IP required') from exc
+            if (not (address.is_private or address.is_loopback) or address.is_unspecified
+                    or address.is_multicast or address.is_link_local or str(address) != target['host']):
+                raise ValueError('canonical private or loopback observed server IP required')
         if (target['authority_reference'] != self.authority_sha256 or target['scope'] != 'disposable_local_test'
-                or target['host'] not in ('127.0.0.1', '::1') or type(target['port']) is not int
+                or connect_host not in ('127.0.0.1', '::1') or type(connect_port) is not int
+                or not 1 <= connect_port <= 65535 or connect_port in (20178, 20179, 55490)
+                or type(target['port']) is not int
                 or not 1 <= target['port'] <= 65535 or target['port'] in (20178, 20179, 55490)
                 or type(target['server_version_num']) is not int):
             raise ValueError('unapproved target scope')
