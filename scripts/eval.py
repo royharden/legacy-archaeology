@@ -46,45 +46,60 @@ def parser():
     return p
 
 
-def t3_precheck(protected,cases):
-    """Everything provider_port/run_suite will demand of the cases, checked before admission."""
+def t3_precheck(protected,cases,config):
+    """Every check provider_port and run_suite make before begin(), run before the
+    irreversible admission (mirrors evaluation/runner.py run_suite and
+    ProtectedLiveContext.provider_port); only scope-inherent checks remain after it."""
     from la.contracts import digest
     from evaluation.runner import _prompt_input
-    suite=protected.eligibility.suite
-    if ([case.variant_id for case in cases]!=suite['variant_ids']
+    from evaluation.eligibility import variant_identity
+    eligibility=protected.eligibility
+    suite=eligibility.suite
+    if ([case.variant_id for case in cases]!=suite['variant_ids'] or len(cases)!=8
+            or len({case.variant_id for case in cases})!=8 or suite['mode']!='live'
             or any(case.split!='heldout' or case.edition!=protected.edition for case in cases)):
-        raise ValueError('T3 cases must be exactly the declared heldout suite variants of this edition')
+        raise ValueError('T3 cases must be exactly the 8 declared live heldout suite variants of this edition')
+    for case in cases:
+        if len(case.batches)!=10 or any(len(batch.oracle)!=100 for batch in case.batches):
+            raise ValueError('each variant requires ten 100-record batches')
+        malformed=sum(row['expected_outcome']=='quarantined' for batch in case.batches for row in batch.oracle)
+        if not 20<=malformed<=50: raise ValueError('sealed 2-5 percent malformed stratum required per variant')
+    if type(config.get('attempt_request_id')) is not str or not config['attempt_request_id']:
+        raise ValueError('exact attempt request id required')
+    if config.get('freeze')!=eligibility.freeze or (config.get('pins') or {})!=eligibility.freeze['pins']:
+        raise ValueError('mixed frozen suite configurations')
+    declared={item['variant_id']:item for item in eligibility.commitment['variants']}
+    if any(variant_identity(case)!=declared.get(case.variant_id) for case in cases):
+        raise ValueError('actual source/sample/brief/oracle differs from T0')
     if len({digest(_prompt_input(case.visible)) for case in cases})!=len(cases):
         raise ValueError('two heldout variants share one provider-visible input; ambiguous T3 attribution')
-    protected.eligibility.validate()
-
-
-def t3_question_cap(questions,cap):
-    """Signed max_questions per layout; also enforced if the runner gains D6's question_cap hook."""
-    def capped(visible):
-        value=questions(visible)
-        if len(value)>cap: raise ValueError('signed T3 question cap exceeded')
-        return value
-    return capped
+    eligibility.validate()
 
 
 def admit_t3(protected,config):
-    """Admit the signed scope once; an exact resume continues only from its own admission head."""
+    """Admit the signed scope once, or resume it from this edition's own folded state.
+
+    Resume never uses the global registry tail (other editions append to the same
+    chain). It requires this exact scope admitted, no attempt, no calls, not
+    exposed/retired, and an operator-supplied t3_resume_registry_head equal to the
+    one snapshot read; begin()'s CAS still catches any later append.
+    """
     registry=protected.registry
-    admitted=registry.state(protected.edition).get('t3')
+    snapshot=registry.snapshot()
+    state=type(registry)._state(snapshot['events'],protected.edition)
+    admitted=state.get('t3')
     if admitted is None:
         receipt=protected.admit(request_id=config['t3_admission_request_id'],
                                 expected_head=config.get('expected_registry_head'))
         return receipt.event['event_sha256']
     if admitted['scope_receipt_sha256']!=protected.scope_sha256():
         raise ValueError('a different T3 scope is already admitted for this edition')
-    events=registry.events()
-    last=events[-1] if events else None
-    # No recency guess: resume only if this scope's admission is still the exact head.
-    if (last is None or last['event_type']!='t3_scope_admitted'
-            or last['payload']['scope_receipt_sha256']!=protected.scope_sha256()):
-        raise ValueError('registry advanced after this T3 admission; inspect edition-state before any new attempt')
-    return last['event_sha256']
+    if state['attempt'] is not None or admitted['calls'] or state['exposed'] or state['retired']:
+        raise ValueError('admitted T3 scope already has an attempt/calls or a disposition; no resume')
+    head=config.get('t3_resume_registry_head')
+    if head is None or head!=snapshot['head']:
+        raise ValueError('resume requires t3_resume_registry_head equal to the current registry head (see edition-state/export)')
+    return head
 
 
 def execute(args):
@@ -197,7 +212,12 @@ def execute(args):
             target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
             if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
         if protected is not None:
-            t3_precheck(protected,cases)
+            t3_precheck(protected,cases,config)
+            # Dry-run build with no authority: context keys, imports and RunnerPorts
+            # shape fail here, before admission (provider_port reads authority lazily).
+            dry=selected_factory(context,provider_authority=None)
+            if not isinstance(dry,RunnerPorts) or dry.count_tokens is None:
+                raise ValueError('T3 requires actual RunnerPorts with the explicit token counter')
             suite_head=admit_t3(protected,config)
         if args.ports=='scripts.product_ports:factory':
             from evaluation.public_live import PublicLiveContext
@@ -210,8 +230,8 @@ def execute(args):
             import dataclasses
             if ports.count_tokens is None: raise ValueError('T3 meter requires the explicit token counter')
             # D6 meter reserves/settles in the registry around the trusted D7 transport.
-            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens),
-                                      questions=t3_question_cap(ports.questions,protected.validate()['caps']['max_questions']))
+            # The runner's own D6 hooks enforce the protected port and signed max_questions.
+            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens))
         result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
             authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
             eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=suite_head,

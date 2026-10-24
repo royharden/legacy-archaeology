@@ -56,8 +56,8 @@ def factory(context):
             # Verified, then retained as signed evidence where the context looks it up.
             verifier.verify(scope,'run_owner'); context['store'].put('signed_evidence',scope)
             result.validate()
-            # Full scope validation needs registry admission; scripts/eval.py admits
-            # it explicitly before any ports/provider wiring or run_suite.
+            # Full scope validation needs registry admission; scripts/eval.py admits it
+            # only after admission-free suite checks and a dry-run ports build.
             return ProtectedLiveContext(result,scope,
                 BillingAdapter(validate_config(context['billing_config']),priced_usage))
     result.validate()

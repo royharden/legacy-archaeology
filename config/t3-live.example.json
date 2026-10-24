@@ -23,6 +23,7 @@
   "pins": "REPLACE_WITH_EXACT_T2_PINS_OBJECT",
   "freeze": "REPLACE_WITH_EXACT_T2_FREEZE_OBJECT",
   "t3_admission_request_id": "REPLACE_WITH_UNIQUE_ADMISSION_REQUEST_ID",
+  "t3_resume_registry_head": null,
   "attempt_request_id": "REPLACE_WITH_UNIQUE_REQUEST_ID",
   "expected_registry_head": "REPLACE_WITH_HEAD_THE_SCOPE_WAS_SIGNED_AGAINST"
 }
