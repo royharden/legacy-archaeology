@@ -1,5 +1,36 @@
 # Independent evaluator source
 
+## Normal-mode development validation
+
+`python -m evaluation.public_check --out <new-owned-directory>` executes all five
+arms on six public development variants and rescores their immutable captures.
+It has no live or hidden mode. R1 selects only offered policies matching the
+public serializer layout and labels those answers `agent_provisional`.
+
+PB-M1-R03 initially ran 119 inherited evaluator tests: 118 passed; one failed
+because Windows checkout converted a pinned LF `.dat` fixture to CRLF. Restoring
+the exact tracked bytes fixed that input corruption without changing gold.
+An independent audit then found two scorer defects: missing `value` could pass
+as typed NULL, and invalid-identity quarantines were omitted from precision.
+`semantic-v3` closes typed observations and counts every quarantine prediction.
+Prior evidence remains preserved; these changes do not rewrite historical scores.
+
+The first six-variant public run produced zero exact valid rows for every arm
+(full denominator 5,820 valid rows per arm). Offline B1 failed; the finite-candidate
+arms mostly abstained. This is a measured limitation, not benchmark success.
+Public development/replay never establishes hidden custody or product acceptance.
+
+Reviewer-owned `tests/e2e/test_database_retained.py` separately exercises the
+authorized M1 database, real commit/new-connection readback against hand literals,
+catalog types/precision, SQL NULL, constraints, rollback and controlled lost ACK.
+It retains successful schemas and artifacts and uses no destructive cleanup.
+Its opt-in and concrete target pins are intentionally specific to the assigned
+M1 RV2 lane; ordinary test discovery skips it. Target claims bind the actual
+product commit, environment, image and logs recorded by the run operator.
+
+The remainder of this document records the inherited construction state and
+interfaces. Statements that code was unexecuted describe that historical phase.
+
 Dirty Mode construction only: no generator, scorer, benchmark or product runtime
 has been executed. All benchmark results remain `not_run`; product acceptance is
 pending. This evaluator belongs outside the inference distribution.
