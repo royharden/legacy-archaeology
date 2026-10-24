@@ -33,6 +33,17 @@ offered-ID simulated SME, and report skeletons. `runner.py` now implements
 store, split=..., ...)`, `summarize_suite(manifests)` and `replay_archive(...)`.
 These are executable source interfaces; none has been executed in construction.
 
+### Portable archives
+
+`archive.py` plans, exports, reads and replays signed public/retired evaluation
+archives and releases owner-approved aggregate projections of active hidden
+results. Planning closes over every transitively reached capture (failed and
+partial attempts included) and refuses reachable hidden payloads unless the
+registry actually retired the edition; replay only rescores with a scorer in this
+checkout and never reruns models, targets or cleanup. The full contract, return
+shapes and known limits are in [ARCHIVE.md](ARCHIVE.md); regression source is
+`tests/evaluation/test_archive.py` (unexecuted).
+
 `RunnerPorts` injects heuristic, finite candidates, questions, mapping resolution,
 common mapping validation/conversion, provider, token counter and optional target
 observer functions. It imports no product code. A `VariantCase` has identical
