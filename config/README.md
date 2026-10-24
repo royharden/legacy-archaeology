@@ -43,6 +43,25 @@ create isolation observations, or turn a boolean into custody. See
 `evaluation/eligibility.py` and `evaluation/edition_registry.py` for closed schemas.
 All signed public profiles contain public keys only; see `docs/EVIDENCE.md`.
 
+`t3-live.example.json` is the protected live template. Its eligibility packet adds
+`scope_receipt`: the separately signed T3 spend scope (role run_owner) that the
+signed suite authority pins as `spend_authority_sha256`. The factory verifies and
+retains it, then returns D6's `ProtectedLiveContext`. `scripts/eval.py` accepts it
+only for `--mode live --split heldout --ports scripts.product_ports:factory`. Admission
+is irreversible (one scope per edition), so every run_suite/provider_port precondition
+(8 declared cases, batch shape, malformed stratum, T0 identities, freeze/pins, request id collisions, target freeze pin, single supported provider, OPENAI_API_KEY presence, B1 provider-text byte bound, no open D7 ledger liability,
+worst-case T3 reservations within the ledger cap) and a dry-run ports build are checked first. It then records `t3_scope_admitted`
+with `t3_admission_request_id` at `expected_registry_head` (the head the scope was signed
+against) and starts the suite at the admission event head. If a run stopped after
+admission with no attempt or calls, rerun with `t3_resume_registry_head` set to the
+current head from `edition-export`; anything else refuses. Not prechecked: ranking-call text size (depends on runtime candidates) and run_variant visible-shape checks. The product provider receives the T3
+trusted view (phase T3, scope hash as authority); D6's meter wraps it to reserve and
+settle every call in the edition registry. A live heldout suite without an admitted
+scope is refused, never run with an unmetered provider. A PublicLiveContext or T1
+authority never authorizes heldout. Unknown T3 liability is reconciled through the
+native provider ledger receipt (evaluation_phase T3, billing_evidence_sha256) and
+D6's signed `reconcile_liability`. The template grants nothing and fails validation.
+
 `target-context.example.json` is supplied as `target_context` in a suite config
 with `--target-factory scripts.target_ports:factory`. `candidate-grants.json` maps
 each exact prepared candidate SHA256 to relative signed_authority, target_config,
@@ -63,3 +82,5 @@ commands with independently supplied signed product-bundle authority/config and
 external bundle pin. Product approval is never fabricated by evaluator proposals.
 
 The inactive experiment-grants.example.json adds an exact experiment reference to the target grant index. Remove both later-recovery keys to use original captured effects. Otherwise supply the explicit selected later record SHA and exact original prior SHA (JSON null only for actually absent prior). These callbacks read pinned immutable captures without a DSN or new target action. See docs/CAPTURE-REPLAY.md for the separate collect/open/reconcile/select-recovery commands; placeholders grant nothing and deliberately fail validation.
+
+`cleanup-grant.example.json` — inactive (`active: false`) closed cleanup grant; every pin must be replaced and a separately signed `disposable_target_cleanup_authority` supplied (see docs/CLEANUP.md). Load/probe authority never grants cleanup.

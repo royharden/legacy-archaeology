@@ -7,34 +7,49 @@ import argparse
 from pathlib import Path
 
 
+def hidden_marker(manifest):
+    """Root-level copy of the producer's hidden markers; the producer still checks every reached capture."""
+    return (manifest.get('split')=='heldout' or manifest.get('evaluation_phase')=='T3'
+            or manifest.get('visibility')=='sealed')
+
+
 def plan_from_packet(store,registry,root,packet):
     from la.contracts.protocol import closed
     from la.app.artifacts import within,read
     from scripts.results import captured
     from evaluation.runner import VariantCase,BatchCase
-    from evaluation.archive import plan_archive
+    # The producer's own bounds (roots; distinct transitive variants), never a drifting copy.
+    from evaluation.archive import plan_archive,MAX_ROOTS,MAX_CASES
     closed(packet,{'schema_version','edition','visibility','manifest_refs','cases','configuration'})
     if type(packet['schema_version']) is not int or packet['schema_version']!=1 or packet['visibility'] not in ('public','retired'):
         raise ValueError('closed public/retired archive caller packet required')
     refs=packet['manifest_refs']
-    if type(refs) is not list or not 1<=len(refs)<=18: raise ValueError('bounded exact archive manifests required')
+    if type(refs) is not list or not 1<=len(refs)<=MAX_ROOTS: raise ValueError('bounded exact archive manifests required')
+    if any(type(ref) is not dict for ref in refs) or len({ref.get('sha256') for ref in refs})!=len(refs):
+        raise ValueError('duplicate/untyped archive root')
     manifests=[captured(store,ref,'variant_manifest') for ref in refs]
     if any(m['edition']!=packet['edition'] for m in manifests): raise ValueError('archive edition differs from actual manifests')
     state=registry.state(packet['edition'])
-    if packet['visibility']=='public' and any(m['split']=='heldout' for m in manifests):
+    if packet['visibility']=='public' and any(hidden_marker(m) for m in manifests):
         raise ValueError('active hidden raw archive/export forbidden before cases/oracle access')
     if packet['visibility']=='retired' and (not state['retired'] or state.get('attempt') is not None and state['attempt']['status']=='running'):
         raise ValueError('actual terminal retirement required before cases/oracle access')
     raw=read(within(root,packet['cases'],exists=True))
-    if type(raw) is not dict or set(raw)!={'variants'} or type(raw['variants']) is not list or len(raw['variants'])!=len(refs):
-        raise ValueError('exact actual archive case set required')
+    # One case per DISTINCT variant the producer reaches transitively (roots,
+    # history, suite reports, arm edges, configuration auxiliaries): not 1:1
+    # with roots. The producer refuses any missing or unreached case.
+    if type(raw) is not dict or set(raw)!={'variants'} or type(raw['variants']) is not list or not 1<=len(raw['variants'])<=MAX_CASES:
+        raise ValueError('bounded actual transitive archive case set required')
     cases=[]
     for item in raw['variants']:
         closed(item,{'variant_id','split','edition','visible','batches'},{'accepted_choices','expected_layout'})
         if item['edition']!=packet['edition']: raise ValueError('archive case edition mismatch')
+        if type(item['batches']) is not list or not 1<=len(item['batches'])<=10: raise ValueError('bounded original case batches required')
+        for batch in item['batches']: closed(batch,{'batch_id','visible','oracle'})
         cases.append(VariantCase(item['variant_id'],item['split'],item['edition'],item['visible'],
             tuple(BatchCase(batch['batch_id'],batch['visible'],batch['oracle']) for batch in item['batches']),
             item.get('accepted_choices',{}),item.get('expected_layout')))
+    if len({case.variant_id for case in cases})!=len(cases): raise ValueError('duplicate archive case variant')
     configuration=read(within(root,packet['configuration'],exists=True))
     return plan_archive(store,cases=cases,manifest_refs=refs,configuration=configuration,registry=registry,visibility=packet['visibility'])
 
@@ -76,7 +91,12 @@ def execute(args):
     if args.command in ('plan','export'):
         plan=plan_from_packet(store,registry,root,read(within(root,args.packet,exists=True)))
         if args.command=='plan':
-            return {'unsigned_release_payload_template':plan.release_payload,'archive_written':False,'authority_created':False}
+            manifest=plan.manifest
+            # archive_sha256 is the external pin later read/replay must be given.
+            return {'unsigned_release_payload_template':plan.release_payload,'archive_sha256':manifest['archive_sha256'],
+                    'edition':manifest['edition'],'visibility':manifest['visibility'],
+                    'registry_head_sha256':manifest['registry_head_sha256'],'member_count':len(manifest['members']),
+                    'auxiliary_count':len(manifest['auxiliary']),'archive_written':False,'authority_created':False}
     from evaluation.eligibility import ReceiptVerifier
     from la.app.public_trust import public_keys
     verifier=ReceiptVerifier(*public_keys(args.public_trust_root,args.public_trust_profile))
@@ -97,7 +117,10 @@ def execute(args):
     path=root/args.archive
     if args.command=='read':
         snapshot=read_archive(path,expected_archive_sha256=args.expected_archive_sha256,verifier=verifier)
-        return {'archive_sha256':args.expected_archive_sha256,'manifest':snapshot.manifest,'extracted':False,'archived_code_executed':False}
+        import hashlib
+        return {'archive_sha256':args.expected_archive_sha256,'manifest':snapshot.manifest,
+                'release_sha256':hashlib.sha256(snapshot.release_bytes).hexdigest(),
+                'extracted':False,'archived_code_executed':False}
     result_store=CaptureStore(within(root,args.result_store,exists=True))
     return replay_portable_archive(path,expected_archive_sha256=args.expected_archive_sha256,verifier=verifier,
                                    result_store=result_store,scorer_version=args.scorer_version)

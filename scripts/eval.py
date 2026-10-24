@@ -46,6 +46,96 @@ def parser():
     return p
 
 
+def t3_precheck(protected,cases,config,*,target_factory=None):
+    """Every check provider_port and run_suite make before begin(), run before the
+    irreversible admission (mirrors evaluation/runner.py run_suite and
+    ProtectedLiveContext.provider_port); only scope-inherent checks remain after it."""
+    from la.contracts import digest
+    from evaluation.runner import _prompt_input
+    from evaluation.eligibility import variant_identity
+    eligibility=protected.eligibility
+    suite=eligibility.suite
+    if ([case.variant_id for case in cases]!=suite['variant_ids'] or len(cases)!=8
+            or len({case.variant_id for case in cases})!=8 or suite['mode']!='live'
+            or any(case.split!='heldout' or case.edition!=protected.edition for case in cases)):
+        raise ValueError('T3 cases must be exactly the 8 declared live heldout suite variants of this edition')
+    for case in cases:
+        if len(case.batches)!=10 or any(len(batch.oracle)!=100 for batch in case.batches):
+            raise ValueError('each variant requires ten 100-record batches')
+        malformed=sum(row['expected_outcome']=='quarantined' for batch in case.batches for row in batch.oracle)
+        if not 20<=malformed<=50: raise ValueError('sealed 2-5 percent malformed stratum required per variant')
+    if type(config.get('attempt_request_id')) is not str or not config['attempt_request_id']:
+        raise ValueError('exact attempt request id required')
+    if config.get('freeze')!=eligibility.freeze or (config.get('pins') or {})!=eligibility.freeze['pins']:
+        raise ValueError('mixed frozen suite configurations')
+    declared={item['variant_id']:item for item in eligibility.commitment['variants']}
+    if any(variant_identity(case)!=declared.get(case.variant_id) for case in cases):
+        raise ValueError('actual source/sample/brief/oracle differs from T0')
+    if len({digest(_prompt_input(case.visible)) for case in cases})!=len(cases):
+        raise ValueError('two heldout variants share one provider-visible input; ambiguous T3 attribution')
+    eligibility.validate()
+    # D7 transport preconditions: each fails before sending yet after begin(), so
+    # it would settle unknown and consume the sealed edition. Check them now.
+    import os
+    from la.providers.evaluation import provider_text
+    from la.providers.accounting import CallLedger
+    scope=protected._scope(check_time=True)  # the same read admit() performs
+    if scope['provider']!='openai-responses':
+        raise ValueError('T3 scope provider is not the single supported D7 live provider')
+    if not os.environ.get('OPENAI_API_KEY'):  # presence only; the value is never kept or logged
+        raise ValueError('OPENAI_API_KEY must be set before T3 admission')
+    limit=min(8000,scope['caps']['max_input_tokens'])
+    for case in cases:
+        text=provider_text('B1',{'purpose':'single_pass_full_mapping','input':_prompt_input(case.visible)})
+        if len(text.encode())>limit:
+            raise ValueError('B1 provider text for '+case.variant_id+' exceeds the D7 byte bound')
+    if target_factory and (config.get('target_freeze_sha256') or config['freeze']['freeze_sha256'])!=eligibility.freeze['freeze_sha256']:
+        raise ValueError('target freeze pin differs from the frozen T2 freeze')
+    attempt=config['attempt_request_id']
+    used={event['request_id'] for event in protected.registry.events()}
+    derived={attempt,attempt+':finish',attempt+':failure'}
+    if config['t3_admission_request_id'] in derived or derived&used:
+        raise ValueError('attempt request id collides with an admission or existing registry request')
+    ledger=CallLedger(Path(config.get('port_context',{}).get('ledger_path','.la-runs/evaluator-provider.sqlite')))
+    snapshot=ledger.snapshot()
+    if snapshot['unknown_attempt_ids']:
+        raise ValueError('D7 provider ledger has an open reserved/unknown liability; reconcile or fence it first')
+    # With no open liability, known cost is the ledger's whole liability; every
+    # signed T3 request must still fit the shared lifetime cap (T1 spend counts too).
+    from la.providers.accounting import amount
+    billing=config['port_context']['provider_config']
+    per_call=(billing['max_input_tokens']*amount(billing['input_usd_per_million'])
+              +billing['max_output_tokens']*amount(billing['output_usd_per_million']))/1000000
+    if amount(snapshot['known_cost_usd'])+scope['caps']['max_total_requests']*per_call>amount(billing['total_cap_usd']):
+        raise ValueError('D7 ledger total_cap_usd cannot cover the worst-case signed T3 reservations')
+
+
+def admit_t3(protected,config):
+    """Admit the signed scope once, or resume it from this edition's own folded state.
+
+    Resume never uses the global registry tail (other editions append to the same
+    chain). It requires this exact scope admitted, no attempt, no calls, not
+    exposed/retired, and an operator-supplied t3_resume_registry_head equal to the
+    one snapshot read; begin()'s CAS still catches any later append.
+    """
+    registry=protected.registry
+    snapshot=registry.snapshot()
+    state=type(registry)._state(snapshot['events'],protected.edition)
+    admitted=state.get('t3')
+    if admitted is None:
+        receipt=protected.admit(request_id=config['t3_admission_request_id'],
+                                expected_head=config.get('expected_registry_head'))
+        return receipt.event['event_sha256']
+    if admitted['scope_receipt_sha256']!=protected.scope_sha256():
+        raise ValueError('a different T3 scope is already admitted for this edition')
+    if state['attempt'] is not None or admitted['calls'] or state['exposed'] or state['retired']:
+        raise ValueError('admitted T3 scope already has an attempt/calls or a disposition; no resume')
+    head=config.get('t3_resume_registry_head')
+    if head is None or head!=snapshot['head']:
+        raise ValueError('resume requires t3_resume_registry_head equal to the current registry head (see edition-export)')
+    return head
+
+
 def execute(args):
     # This script is deliberately outside the installed inference distribution.
     base = Path(__file__).resolve().parents[1]
@@ -66,7 +156,8 @@ def execute(args):
     capture_root = within(root, args.out)
     capture_root.mkdir(parents=True, exist_ok=True)
     store = CaptureStore(capture_root)
-    eligibility=None
+    eligibility=protected=None
+    suite_head=config.get('expected_registry_head')
     if args.command=='suite' and (args.mode=='live' or args.split=='heldout'):
         from evaluation.edition_registry import EligibilityContext
         from evaluation.public_live import PublicLiveContext
@@ -76,7 +167,21 @@ def execute(args):
             {'store':store,'evidence_root':root,'packet':config.get('eligibility_context',{}),
              'public_trust_root':args.public_trust_root,'public_trust_profile':args.public_trust_profile,
              'billing_config':config.get('port_context',{}).get('provider_config')})
-        if type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        try:
+            from evaluation.protected_live import ProtectedLiveContext
+        except ImportError:
+            ProtectedLiveContext=None  # producer absent: T3 live spend stays unavailable, never raw
+        if ProtectedLiveContext is not None and type(eligibility) is ProtectedLiveContext:
+            if args.mode!='live' or args.split!='heldout' or args.ports!='scripts.product_ports:factory':
+                raise ValueError('T3 spend scope applies only to a live heldout suite with the trusted product ports')
+            if type(config.get('t3_admission_request_id')) is not str or not config['t3_admission_request_id']:
+                raise ValueError('explicit T3 scope admission request id required')
+            # Admission is irreversible (one scope per edition), so it happens in
+            # admit_t3() only after every admission-free suite check has passed.
+            protected,eligibility=eligibility,eligibility.eligibility
+        elif type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        if args.mode=='live' and args.split=='heldout' and protected is None:
+            raise ValueError('live heldout requires a signed admitted T3 spend scope; no unmetered provider')
         eligibility.validate()
         expected_freeze=None if type(eligibility) is PublicLiveContext else eligibility.freeze
         if eligibility.registry.store.root!=store.root or expected_freeze!=config.get('freeze'):
@@ -133,12 +238,6 @@ def execute(args):
         if set(context) & forbidden:
             raise ValueError('factory context must not contain evaluator-only inputs')
         selected_factory=getattr(importlib.import_module(module),symbol)
-        if args.ports=='scripts.product_ports:factory':
-            from evaluation.public_live import PublicLiveContext
-            signed_provider=eligibility.validate() if type(eligibility) is PublicLiveContext else None
-            ports=selected_factory(context,provider_authority=signed_provider)
-        else: ports=selected_factory(context)
-        if not isinstance(ports, RunnerPorts): raise ValueError('factory must supply actual RunnerPorts')
         target_ports=None
         if args.target_factory:
             from evaluation.target_runner import TargetPorts
@@ -146,9 +245,30 @@ def execute(args):
             if not separator: raise ValueError('explicit target module:factory required')
             target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
             if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
+        if protected is not None:
+            t3_precheck(protected,cases,config,target_factory=args.target_factory)
+            # Dry-run build with no authority: context keys, imports and RunnerPorts
+            # shape fail here, before admission (provider_port reads authority lazily).
+            dry=selected_factory(context,provider_authority=None)
+            if not isinstance(dry,RunnerPorts) or dry.count_tokens is None:
+                raise ValueError('T3 requires actual RunnerPorts with the explicit token counter')
+            suite_head=admit_t3(protected,config)
+        if args.ports=='scripts.product_ports:factory':
+            from evaluation.public_live import PublicLiveContext
+            signed_provider=(eligibility.validate() if type(eligibility) is PublicLiveContext
+                             else protected.trusted_authority() if protected is not None else None)
+            ports=selected_factory(context,provider_authority=signed_provider)
+        else: ports=selected_factory(context)
+        if not isinstance(ports, RunnerPorts): raise ValueError('factory must supply actual RunnerPorts')
+        if protected is not None:
+            import dataclasses
+            if ports.count_tokens is None: raise ValueError('T3 meter requires the explicit token counter')
+            # D6 meter reserves/settles in the registry around the trusted D7 transport.
+            # The runner's own D6 hooks enforce the protected port and signed max_questions.
+            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens))
         result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
             authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
-            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=config.get('expected_registry_head'),
+            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=suite_head,
             target_ports=target_ports,target_freeze_sha256=config.get('target_freeze_sha256'))
         return receipt(capture_root, 'evaluation', dict(edition=cases[0].edition, result=result,
             benchmark_status=result['summary']['benchmark_status'], product_acceptance='pending'))
