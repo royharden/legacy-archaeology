@@ -20,7 +20,7 @@ from typing import Callable
 from .artifacts import canonical, digest, is_sha
 from .benchmark import ARMS, FREEZE_KEYS
 from .eligibility import ReceiptVerifier, closed, hashes, text, validate_commitment, validate_freeze, validate_suite
-from .public_live import BillingAdapter, money, validate_price
+from .public_live import BillingAdapter, money, validate_price, validate_void, voidable
 
 SCOPE_KEYS = {'schema_version', 'stage', 'action', 'edition', 'attempt_id', 'commitment_sha256',
               'freeze_sha256', 'suite_sha256', 'edition_nonce', 'nonce', 'pins', 'provider', 'model',
@@ -157,7 +157,7 @@ def fold_protected_event(state: dict, event: dict) -> bool:
     if kind == 'arm_finished':
         if value.get('method') == 'B1' and value.get('status') == 'completed':
             calls = [c for c in protected['calls'].values()
-                     if c['variant_id'] == value.get('variant_id') and c['method'] == 'B1']
+                     if c['variant_id'] == value.get('variant_id') and c['method'] == 'B1' and not c.get('voided')]
             if len(calls) != 1 or calls[0]['status'] != 'known':
                 raise ValueError('complete T3 B1 needs exactly one accounted request, never repair/no-output')
         if value.get('status') == 'completed' and any(
@@ -183,6 +183,16 @@ def fold_protected_event(state: dict, event: dict) -> bool:
         return True
     if not kind.startswith('t3_'):
         return False
+    if kind == 't3_request_voided':
+        closed(value, {'attempt_id', 'call_id', 'void_authority_sha256', 'ledger_capture'}, 'T3 void')
+        call = protected['calls'].get(value['call_id'])
+        if value['attempt_id'] != scope['attempt_id'] or not voidable(call):
+            raise ValueError('no voidable T3 call')
+        hashes(value, ('void_authority_sha256',))
+        # Never sent: zero liability, still counted against request caps, never a B1 success.
+        call.update(status='known', known_cost='0', usage=None, voided=True, overrun=False,
+                    ledger_capture=deepcopy(value['ledger_capture']))
+        return True
     if kind == 't3_request_settled':
         # An in-flight call must settle truthfully even if the edition was exposed
         # or the attempt ended meanwhile; only the exact reserved call is required.
@@ -355,6 +365,20 @@ class ProtectedLiveContext:
                              or item.edition != self.edition for item in mapped.values()):
             raise ValueError('T3 port admits only declared heldout variants of this edition')
         return ProtectedProviderPort(self, inner, mapped, count_tokens)
+
+    def void_unsent_reservation(self, signed_receipt: dict, *, request_id: str):
+        """Clear a still-reserved T3 call proven never sent; allowed after exposure, like reconciliation."""
+        scope = self._scope(check_time=False, billing=False)
+        self._admitted(scope)
+        payload = self.eligibility.verifier.verify(signed_receipt, 'run_owner')
+        call_id = payload.get('call_id') if isinstance(payload, dict) else None
+        call = self.registry.state(self.edition)['t3']['calls'].get(call_id) if isinstance(call_id, str) else None
+        receipt = validate_void(payload, phase='T3', edition=self.edition, attempt_id=scope['attempt_id'],
+                                authority_sha256=scope['scope_sha256'], call=call, store=self.registry.store)
+        return self.registry._append(self.edition, 't3_request_voided',
+            {'attempt_id': scope['attempt_id'], 'call_id': receipt['call_id'],
+             'void_authority_sha256': digest(signed_receipt), 'ledger_capture': receipt['ledger_capture']},
+            request_id=request_id, expected_head=self.registry.head)
 
     def reconcile_liability(self, signed_receipt: dict, *, request_id: str):
         # No custody/exposure gate: an unknown liability must stay reconcilable after
