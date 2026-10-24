@@ -25,6 +25,10 @@ def amount(value) -> Decimal:
     return result
 
 
+FENCE_PINS = ('evaluation_phase', 'evaluation_authority_sha256', 'gateway_prompt_sha256',
+              'source_sha256', 'evaluator_method')
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -87,6 +91,12 @@ class CallLedger:
             prior = db.execute('SELECT liability,status FROM provider_attempts').fetchall()
             if any(status in ('reserved', 'unknown_liability') for _, status in prior):
                 raise ValueError('in-flight or unknown liability blocks every additional call')
+            # A1.1: a fenced (voidable, never-sent) evaluator call can never reach transport.
+            if 'evaluation_phase' in pins:
+                for (payload,) in db.execute("SELECT payload FROM provider_attempts WHERE status='fenced'"):
+                    fence = json.loads(payload)
+                    if all(fence.get(key) == pins.get(key) for key in FENCE_PINS):
+                        raise ValueError('evaluator call is fenced as unsent; it can never be reserved')
             if sum((amount(value) for value, _ in prior), Decimal(0)) + reserve > cap:
                 raise ValueError('conservative total budget exhausted')
             # Layout run identity must be shared across repairs and regeneration.
@@ -128,14 +138,15 @@ class CallLedger:
             self.event(db, reservation['attempt_id'], dict(kind='settlement', receipt=receipt))
         return receipt
 
-    def attempts_matching(self, *, evaluation_phase, evaluation_authority_sha256,
-                          gateway_prompt_sha256, source_sha256, evaluator_method) -> dict:
-        """Read-only attestation of provider attempts for one evaluator call (T3-LIVE-API A1).
+    def fence_unsent(self, *, evaluation_phase, evaluation_authority_sha256, gateway_prompt_sha256,
+                     source_sha256, evaluator_method, fence_id) -> dict:
+        """Atomically prove-and-fence one evaluator call as never sent (T3-LIVE-API A1.1).
 
-        generate_once reserves here before any transport, so an empty list proves
-        the call was never sent from THIS ledger. Writes nothing; the attestation
-        pins the ledger path so a different (e.g. fresh, empty) ledger cannot
-        stand in for the one the run actually used.
+        generate_once reserves here before any transport. In one BEGIN IMMEDIATE:
+        if no provider attempt carries these five pins, write a zero-cost 'fenced'
+        tombstone that reserve() then refuses forever; otherwise write nothing.
+        Exact retry with the same fence_id returns the existing fence. The result
+        pins this ledger's path so another (e.g. fresh, empty) ledger cannot stand in.
         """
         from la.contracts.protocol import identity
         if evaluation_phase not in ('T1', 'T3') or evaluator_method not in ('B1', 'C0', 'R0', 'R1'):
@@ -145,17 +156,31 @@ class CallLedger:
                      evaluator_method=evaluator_method)
         for key in ('evaluation_authority_sha256', 'gateway_prompt_sha256', 'source_sha256'):
             identity(query[key])
-        attempts = []
+        identity(fence_id)
+        attempts, existing = [], None
         with self.connection() as db:
-            db.execute('BEGIN')
-            for (payload,) in db.execute('SELECT payload FROM provider_attempts ORDER BY id'):
+            db.execute('BEGIN IMMEDIATE')
+            for status, payload in db.execute('SELECT status,payload FROM provider_attempts ORDER BY id'):
                 value = json.loads(payload)
-                if all(value.get(key) == item for key, item in query.items()):
-                    attempts.append(value)
-                    if len(attempts) > 1000: raise ValueError('attestation match bound exceeded')
+                if not all(value.get(key) == item for key, item in query.items()):
+                    continue
+                if status == 'fenced' and value.get('fence_id') == fence_id:
+                    existing = value
+                    continue
+                attempts.append(value)
+                if len(attempts) > 1000: raise ValueError('attestation match bound exceeded')
+            fence = None
+            if not attempts:
+                fence = existing
+                if fence is None:
+                    fence = dict(query, schema_version=1, kind='unsent_fence', fence_id=fence_id,
+                                 cost_known=True, cost_usd='0', fenced_at=now())
+                    cursor = db.execute('INSERT INTO provider_attempts(run,method,liability,status,payload) VALUES(?,?,?,?,?)',
+                                        ('fence:' + fence_id, 'fence', '0', 'fenced', canonical(fence).decode()))
+                    self.event(db, cursor.lastrowid, dict(kind='fence', fence=fence))
         result = {'schema_version': 1, 'kind': 'call_ledger_attestation',
                   'ledger_path_sha256': digest(str(self.path.resolve())), 'query': query,
-                  'attempts': attempts, 'observed_at': now()}
+                  'attempts': attempts, 'fenced': fence is not None, 'fence': fence, 'observed_at': now()}
         result['attestation_sha256'] = digest(result)
         return result
 
@@ -193,12 +218,16 @@ class CallLedger:
     def snapshot(self) -> dict:
         with self.connection() as db:
             db.execute('BEGIN')
-            calls = [json.loads(row[0]) for row in db.execute('SELECT payload FROM provider_attempts ORDER BY id')]
+            rows = [(row[0], json.loads(row[1])) for row in db.execute('SELECT status,payload FROM provider_attempts ORDER BY id')]
             events = [json.loads(row[0]) for row in db.execute('SELECT payload FROM provider_events ORDER BY sequence')]
+        # Fences are zero-cost never-sent tombstones, not provider request attempts.
+        calls = [value for status, value in rows if status != 'fenced']
+        fences = [value for status, value in rows if status == 'fenced']
         result = dict(schema_version=1, calls=calls, events=events,
                       known_cost_usd=str(sum((amount(c['cost_usd']) for c in calls if c['cost_known']), Decimal(0))),
                       unknown_attempt_ids=[c['attempt_id'] for c in calls if not c['cost_known']],
                       request_attempts=len(calls))
+        if fences: result['fences'] = fences  # absent when none, so prior export shapes are unchanged
         return dict(result, export_sha256=digest(result))
 
     def export(self, destination) -> dict:

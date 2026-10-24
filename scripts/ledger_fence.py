@@ -1,9 +1,11 @@
-"""Explicit operator command: attest provider-ledger attempts for one evaluator call.
+"""Explicit operator command: fence one evaluator call as never sent (T3-LIVE-API A1.1).
 
-Produces the read-only T3-LIVE-API A1 `call_ledger_attestation` from an EXISTING
-provider ledger (never a freshly created empty one) and stores it verbatim in an
-existing evaluator CaptureStore, where a signed run_owner void receipt can cite it.
-Mints no authority and voids nothing. No ledger/database access on import.
+Runs CallLedger.fence_unsent on an EXISTING provider ledger (never a freshly
+created empty one): atomically, either matching provider attempts are reported
+and nothing is written, or a zero-cost 'fenced' tombstone is written that
+reserve() refuses forever. The returned `call_ledger_attestation` is stored
+verbatim in an existing evaluator CaptureStore for a signed run_owner void
+receipt to cite. Mints no authority and voids nothing itself. No ledger access on import.
 """
 import argparse
 from pathlib import Path
@@ -19,6 +21,7 @@ def parser():
     p.add_argument('--gateway-prompt-sha256',required=True)
     p.add_argument('--source-sha256',required=True)
     p.add_argument('--evaluator-method',required=True,choices=['B1','C0','R0','R1'])
+    p.add_argument('--fence-id',required=True,help='the exact evaluator call_id being voided')
     return p
 
 
@@ -29,15 +32,15 @@ def execute(args):
     from la.providers.accounting import CallLedger
     from evaluation.artifacts import CaptureStore
     root=Path(args.operator_root).resolve(strict=True)
-    # exists=True: CallLedger would otherwise create an empty ledger whose
-    # attestation falsely shows "never sent".
+    # exists=True and nonempty: CallLedger would otherwise create an empty ledger
+    # whose attestation falsely shows "never sent".
     ledger=within(root,args.ledger,exists=True)
     if not ledger.is_file() or ledger.stat().st_size==0: raise ValueError('existing nonempty provider ledger required')
     store=CaptureStore(within(root,args.capture_root,exists=True))
-    value=CallLedger(ledger).attempts_matching(evaluation_phase=args.evaluation_phase,
+    value=CallLedger(ledger).fence_unsent(evaluation_phase=args.evaluation_phase,
         evaluation_authority_sha256=args.evaluation_authority_sha256,
         gateway_prompt_sha256=args.gateway_prompt_sha256,source_sha256=args.source_sha256,
-        evaluator_method=args.evaluator_method)
+        evaluator_method=args.evaluator_method,fence_id=args.fence_id)
     return {'attestation':value,'capture':store.put('call_ledger_attestation',value),
             'voided':False,'authority_created':False}
 
@@ -47,7 +50,7 @@ def main():
         from la.app.cli import emit_result
         emit_result(execute(parser().parse_args()))
     except (ValueError,OSError,KeyError,TypeError,ImportError,AttributeError) as exc:
-        raise SystemExit('la_ledger_attest: '+type(exc).__name__+'; inspect local non-secret contracts') from None
+        raise SystemExit('la_ledger_fence: '+type(exc).__name__+'; inspect local non-secret contracts') from None
 
 
 if __name__=='__main__': main()
