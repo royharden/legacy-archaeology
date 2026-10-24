@@ -80,6 +80,20 @@ def _context(experiment_path, artifacts, original_authority, *, expected_experim
     return candidate, original, marker, binding
 
 
+def cleanup_binding(experiment_path, artifacts, original_authority, *, expected_experiment_sha256,
+                    expected_original_observation_sha256, target_config, authority_verifier):
+    """Offline: the exact binding a cleanup authority must sign. No connection, no authority created."""
+    return deepcopy(_context(experiment_path, artifacts, original_authority,
+        expected_experiment_sha256=expected_experiment_sha256,
+        expected_original_observation_sha256=expected_original_observation_sha256,
+        target_config=target_config, authority_verifier=authority_verifier)[3])
+
+
+def authorize_cleanup(authority, verifier, expected_cleanup_authority_sha256, binding, operation):
+    """Offline: full dedicated-authority check against an exact binding (signature, scope, keys, pins)."""
+    _authorize(authority, verifier, expected_cleanup_authority_sha256, binding, operation)
+
+
 def _authorize(authority, verifier, expected, binding, operation):
     if not is_sha(expected): raise ValueError('explicit cleanup authority pin required')
     body = verified_target_authority(authority, verifier)
