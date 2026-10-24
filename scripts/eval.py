@@ -66,7 +66,8 @@ def execute(args):
     capture_root = within(root, args.out)
     capture_root.mkdir(parents=True, exist_ok=True)
     store = CaptureStore(capture_root)
-    eligibility=None
+    eligibility=protected=None
+    suite_head=config.get('expected_registry_head')
     if args.command=='suite' and (args.mode=='live' or args.split=='heldout'):
         from evaluation.edition_registry import EligibilityContext
         from evaluation.public_live import PublicLiveContext
@@ -76,7 +77,24 @@ def execute(args):
             {'store':store,'evidence_root':root,'packet':config.get('eligibility_context',{}),
              'public_trust_root':args.public_trust_root,'public_trust_profile':args.public_trust_profile,
              'billing_config':config.get('port_context',{}).get('provider_config')})
-        if type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        try:
+            from evaluation.protected_live import ProtectedLiveContext
+        except ImportError:
+            ProtectedLiveContext=None  # producer absent: T3 live spend stays unavailable, never raw
+        if ProtectedLiveContext is not None and type(eligibility) is ProtectedLiveContext:
+            if args.mode!='live' or args.split!='heldout' or args.ports!='scripts.product_ports:factory':
+                raise ValueError('T3 spend scope applies only to a live heldout suite with the trusted product ports')
+            if type(config.get('t3_admission_request_id')) is not str or not config['t3_admission_request_id']:
+                raise ValueError('explicit T3 scope admission request id required')
+            # Admission is recorded before any provider wiring; the signed scope
+            # pins the registry head it was signed against.
+            admitted=eligibility.admit(request_id=config['t3_admission_request_id'],
+                                       expected_head=config.get('expected_registry_head'))
+            protected,eligibility=eligibility,eligibility.eligibility
+            suite_head=admitted.event['event_sha256']
+        elif type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        if args.mode=='live' and args.split=='heldout' and protected is None:
+            raise ValueError('live heldout requires a signed admitted T3 spend scope; no unmetered provider')
         eligibility.validate()
         expected_freeze=None if type(eligibility) is PublicLiveContext else eligibility.freeze
         if eligibility.registry.store.root!=store.root or expected_freeze!=config.get('freeze'):
@@ -135,10 +153,16 @@ def execute(args):
         selected_factory=getattr(importlib.import_module(module),symbol)
         if args.ports=='scripts.product_ports:factory':
             from evaluation.public_live import PublicLiveContext
-            signed_provider=eligibility.validate() if type(eligibility) is PublicLiveContext else None
+            signed_provider=(eligibility.validate() if type(eligibility) is PublicLiveContext
+                             else protected.trusted_authority() if protected is not None else None)
             ports=selected_factory(context,provider_authority=signed_provider)
         else: ports=selected_factory(context)
         if not isinstance(ports, RunnerPorts): raise ValueError('factory must supply actual RunnerPorts')
+        if protected is not None:
+            import dataclasses
+            if ports.count_tokens is None: raise ValueError('T3 meter requires the explicit token counter')
+            # D6 meter reserves/settles in the registry around the trusted D7 transport.
+            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens))
         target_ports=None
         if args.target_factory:
             from evaluation.target_runner import TargetPorts
@@ -148,7 +172,7 @@ def execute(args):
             if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
         result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
             authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
-            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=config.get('expected_registry_head'),
+            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=suite_head,
             target_ports=target_ports,target_freeze_sha256=config.get('target_freeze_sha256'))
         return receipt(capture_root, 'evaluation', dict(edition=cases[0].edition, result=result,
             benchmark_status=result['summary']['benchmark_status'], product_acceptance='pending'))

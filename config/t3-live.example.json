@@ -1,0 +1,28 @@
+{
+  "port_context": {
+    "run": "REPLACE_WITH_FROZEN_ATTEMPT_ID",
+    "use_ranker": true,
+    "provider_config": "REPLACE_WITH_EXACT_BILLING_CONFIG_OBJECT_PINNED_BY_THE_T3_SCOPE",
+    "ledger_path": "operator/t3-provider-ledger.sqlite"
+  },
+  "eligibility_context": {
+    "phase": "T3",
+    "registry": "operator/editions.sqlite",
+    "commitment": "operator/t0-commitment.json",
+    "freeze": "operator/t2-freeze.json",
+    "suite": "operator/t3-live-suite.json",
+    "probe_receipt": "operator/signed-canary-observation.json",
+    "authority_receipt": "operator/signed-suite-authority-pinning-spend-scope.json",
+    "review_receipts": [
+      "operator/signed-inherited-handles.json", "operator/signed-oracle-broker.json",
+      "operator/signed-network-route.json", "operator/signed-inference-distribution.json",
+      "operator/signed-prompt-allowlist.json", "operator/signed-independent-custody-review.json"
+    ],
+    "scope_receipt": "operator/signed-t3-spend-scope.json"
+  },
+  "pins": "REPLACE_WITH_EXACT_T2_PINS_OBJECT",
+  "freeze": "REPLACE_WITH_EXACT_T2_FREEZE_OBJECT",
+  "t3_admission_request_id": "REPLACE_WITH_UNIQUE_ADMISSION_REQUEST_ID",
+  "attempt_request_id": "REPLACE_WITH_UNIQUE_REQUEST_ID",
+  "expected_registry_head": "REPLACE_WITH_HEAD_THE_SCOPE_WAS_SIGNED_AGAINST"
+}

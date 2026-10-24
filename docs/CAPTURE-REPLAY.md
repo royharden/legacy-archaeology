@@ -28,6 +28,18 @@ six negative effects, failed-load absence, explicit application-ACK predecessor
 and reconciliation separately. The combined normal observation identifies its
 actual raw parents. It does not turn a committed result into lost acknowledgement.
 
+Owned disposable namespace cleanup is a separate explicit operator command, never
+automatic after collection or evaluation:
+`python scripts/target_cleanup.py --operator-root ROOT cleanup --receipt-root operator/cleanup-receipts --experiment captures/EXPERIMENT --expected-experiment-sha256 SHA --expected-original-observation-sha256 SHA --artifact operator/candidate.json --signed-authority operator/signed.json --cleanup-authority operator/signed-cleanup.json --expected-cleanup-authority-sha256 SHA --target-config operator/target.json --public-trust-root PUBLIC_ROOT --public-trust-profile PROFILE`.
+`reconcile-cleanup` adds `--cleanup-receipt` and `--expected-cleanup-sha256` and only
+observes (read-only). `open-cleanup --receipt PATH --expected-cleanup-sha256 SHA` validates a
+retained receipt offline. A dedicated signed cleanup authority naming the exact
+operation is checked before the DSN environment value is read; load authority never
+substitutes. Without a DSN the command records a `target-cleanup-not-run` receipt and
+connects to nothing. With one it opens two caller-owned connections (writer and
+distinct observer) and D5's `la.postgres` cleanup owns every catalog check, statement
+and immutable `cleanup-<sha>.json` receipt. No cleanup ran during construction.
+
 `open` requires --experiment RELATIVE_PATH, --expected-experiment-sha256,
 --expected-candidate-sha256 and --expected-authority-sha256. It validates pinned
 manifest/member bytes and returns only a neutral summary; it reads no DSN or

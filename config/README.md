@@ -43,6 +43,21 @@ create isolation observations, or turn a boolean into custody. See
 `evaluation/eligibility.py` and `evaluation/edition_registry.py` for closed schemas.
 All signed public profiles contain public keys only; see `docs/EVIDENCE.md`.
 
+`t3-live.example.json` is the protected live template. Its eligibility packet adds
+`scope_receipt`: the separately signed T3 spend scope (role run_owner) that the
+signed suite authority pins as `spend_authority_sha256`. The factory verifies and
+retains it, then returns D6's `ProtectedLiveContext`. `scripts/eval.py` accepts it
+only for `--mode live --split heldout --ports scripts.product_ports:factory`. Before
+any provider wiring it records `t3_scope_admitted` with `t3_admission_request_id`
+at `expected_registry_head` (the head the scope was signed against), then starts the
+suite at the exact admission event head. The product provider receives the T3
+trusted view (phase T3, scope hash as authority); D6's meter wraps it to reserve and
+settle every call in the edition registry. A live heldout suite without an admitted
+scope is refused, never run with an unmetered provider. A PublicLiveContext or T1
+authority never authorizes heldout. Unknown T3 liability is reconciled through the
+native provider ledger receipt (evaluation_phase T3, billing_evidence_sha256) and
+D6's signed `reconcile_liability`. The template grants nothing and fails validation.
+
 `target-context.example.json` is supplied as `target_context` in a suite config
 with `--target-factory scripts.target_ports:factory`. `candidate-grants.json` maps
 each exact prepared candidate SHA256 to relative signed_authority, target_config,

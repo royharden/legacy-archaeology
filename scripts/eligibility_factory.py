@@ -21,7 +21,9 @@ def factory(context):
     common={'phase','registry','authority_receipt'}
     phase=packet.get('phase') if type(packet) is dict else None
     required=common|({'catalog'} if phase=='T1' else {'commitment','freeze','suite','probe_receipt','review_receipts'})
-    if type(packet) is not dict or phase not in ('T1','T3') or set(packet)!=required:
+    # T3 live spend additionally names its separately signed spend scope receipt.
+    optional={'scope_receipt'} if phase=='T3' else set()
+    if type(packet) is not dict or phase not in ('T1','T3') or not required<=set(packet)<=required|optional:
         raise ValueError('closed explicit T1 or T3 context packet required')
     verifier=ReceiptVerifier(*public_keys(context['public_trust_root'],context['public_trust_profile']))
     registry=EditionRegistry(within(root,packet['registry'],exists=True),context['store'])
@@ -48,5 +50,15 @@ def factory(context):
         result=EligibilityContext(registry,read(within(root,packet['commitment'],exists=True)),
             read(within(root,packet['freeze'],exists=True)),read(within(root,packet['suite'],exists=True)),
             probe,review_values,authority,verifier)
+        if 'scope_receipt' in packet:
+            from evaluation.protected_live import ProtectedLiveContext
+            scope=read(within(root,packet['scope_receipt'],exists=True))
+            # Verified, then retained as signed evidence where the context looks it up.
+            verifier.verify(scope,'run_owner'); context['store'].put('signed_evidence',scope)
+            result.validate()
+            # Full scope validation needs registry admission; scripts/eval.py admits
+            # it explicitly before any ports/provider wiring or run_suite.
+            return ProtectedLiveContext(result,scope,
+                BillingAdapter(validate_config(context['billing_config']),priced_usage))
     result.validate()
     return result

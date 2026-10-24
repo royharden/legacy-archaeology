@@ -23,7 +23,7 @@ def request_pins(value,*,accounting=False):
         elif key=='evaluator_method':
             if item not in ('B1','C0','R0','R1'): raise ValueError('unknown evaluator request arm')
         elif key=='evaluation_phase':
-            if item!='T1': raise ValueError('unknown explicit provider evaluation phase')
+            if item not in ('T1','T3'): raise ValueError('unknown explicit provider evaluation phase')
         else: text(item,256)
     if ('evaluation_phase' in value)!=('evaluation_authority_sha256' in value):
         raise ValueError('evaluation phase and authority must be supplied together')
