@@ -46,7 +46,7 @@ def parser():
     return p
 
 
-def t3_precheck(protected,cases,config):
+def t3_precheck(protected,cases,config,*,target_factory=None):
     """Every check provider_port and run_suite make before begin(), run before the
     irreversible admission (mirrors evaluation/runner.py run_suite and
     ProtectedLiveContext.provider_port); only scope-inherent checks remain after it."""
@@ -74,6 +74,30 @@ def t3_precheck(protected,cases,config):
     if len({digest(_prompt_input(case.visible)) for case in cases})!=len(cases):
         raise ValueError('two heldout variants share one provider-visible input; ambiguous T3 attribution')
     eligibility.validate()
+    # D7 transport preconditions: each fails before sending yet after begin(), so
+    # it would settle unknown and consume the sealed edition. Check them now.
+    import os
+    from la.providers.evaluation import provider_text
+    from la.providers.accounting import CallLedger
+    scope=protected._scope(check_time=True)  # the same read admit() performs
+    if scope['provider']!='openai-responses':
+        raise ValueError('T3 scope provider is not the single supported D7 live provider')
+    if not os.environ.get('OPENAI_API_KEY'):  # presence only; the value is never kept or logged
+        raise ValueError('OPENAI_API_KEY must be set before T3 admission')
+    limit=min(8000,scope['caps']['max_input_tokens'])
+    for case in cases:
+        text=provider_text('B1',{'purpose':'single_pass_full_mapping','input':_prompt_input(case.visible)})
+        if len(text.encode())>limit:
+            raise ValueError('B1 provider text for '+case.variant_id+' exceeds the D7 byte bound')
+    if target_factory and (config.get('target_freeze_sha256') or config['freeze']['freeze_sha256'])!=eligibility.freeze['freeze_sha256']:
+        raise ValueError('target freeze pin differs from the frozen T2 freeze')
+    attempt=config['attempt_request_id']
+    used={event['request_id'] for event in protected.registry.events()}
+    if attempt==config['t3_admission_request_id'] or {attempt,attempt+':finish',attempt+':failure'}&used:
+        raise ValueError('attempt request id collides with an admission or existing registry request')
+    ledger=CallLedger(Path(config.get('port_context',{}).get('ledger_path','.la-runs/evaluator-provider.sqlite')))
+    if ledger.snapshot()['unknown_attempt_ids']:
+        raise ValueError('D7 provider ledger has an open reserved/unknown liability; reconcile or fence it first')
 
 
 def admit_t3(protected,config):
@@ -98,7 +122,7 @@ def admit_t3(protected,config):
         raise ValueError('admitted T3 scope already has an attempt/calls or a disposition; no resume')
     head=config.get('t3_resume_registry_head')
     if head is None or head!=snapshot['head']:
-        raise ValueError('resume requires t3_resume_registry_head equal to the current registry head (see edition-state/export)')
+        raise ValueError('resume requires t3_resume_registry_head equal to the current registry head (see edition-export)')
     return head
 
 
@@ -212,7 +236,7 @@ def execute(args):
             target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
             if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
         if protected is not None:
-            t3_precheck(protected,cases,config)
+            t3_precheck(protected,cases,config,target_factory=args.target_factory)
             # Dry-run build with no authority: context keys, imports and RunnerPorts
             # shape fail here, before admission (provider_port reads authority lazily).
             dry=selected_factory(context,provider_authority=None)

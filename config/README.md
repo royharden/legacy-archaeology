@@ -49,12 +49,12 @@ signed suite authority pins as `spend_authority_sha256`. The factory verifies an
 retains it, then returns D6's `ProtectedLiveContext`. `scripts/eval.py` accepts it
 only for `--mode live --split heldout --ports scripts.product_ports:factory`. Admission
 is irreversible (one scope per edition), so every run_suite/provider_port precondition
-(8 declared cases, batch shape, malformed stratum, T0 identities, freeze/pins, request
+(8 declared cases, batch shape, malformed stratum, T0 identities, freeze/pins, request id collisions, target freeze pin, single supported provider, OPENAI_API_KEY presence, B1 provider-text byte bound, no open D7 ledger liability
 ids) and a dry-run ports build are checked first. It then records `t3_scope_admitted`
 with `t3_admission_request_id` at `expected_registry_head` (the head the scope was signed
 against) and starts the suite at the admission event head. If a run stopped after
 admission with no attempt or calls, rerun with `t3_resume_registry_head` set to the
-current head from `edition-export`; anything else refuses. The product provider receives the T3
+current head from `edition-export`; anything else refuses. Not prechecked: ranking-call text size (depends on runtime candidates) and run_variant visible-shape checks. The product provider receives the T3
 trusted view (phase T3, scope hash as authority); D6's meter wraps it to reserve and
 settle every call in the edition registry. A live heldout suite without an admitted
 scope is refused, never run with an unmetered provider. A PublicLiveContext or T1
