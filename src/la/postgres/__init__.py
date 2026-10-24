@@ -24,3 +24,5 @@ from .effects import validate_target_observation, validate_negative_effect, writ
 from .experiment import (collect_target_experiment, open_target_experiment,
                          target_experiment_callbacks, reconcile_target_experiment)
 from .recovery import open_target_reconciliation, target_reconciliation_callbacks
+from .cleanup import (cleanup_target_namespace, open_target_cleanup,
+                      reconcile_target_cleanup, validate_target_cleanup)

@@ -293,8 +293,13 @@ class BillingAdapter:
             if cfg['max_' + name] != authority['caps']['max_' + name]: raise ValueError('transport/gateway token bounds differ')
         return self
 
-    def price(self, reply, authority, prompt_sha256, source_sha256, method):
-        """Unknown categories are retained, never converted to zero/full-input billing."""
+    def price(self, reply, authority, prompt_sha256, source_sha256, method, *, phase='T1'):
+        """Unknown categories are retained, never converted to zero/full-input billing.
+
+        phase is 'T1' (public authority) or 'T3' (protected spend scope, whose
+        scope_sha256 is supplied as authority['authority_sha256']).
+        """
+        if phase not in ('T1', 'T3'): return None
         usage = reply.get('usage') if isinstance(reply, dict) else None
         receipt = reply.get('provider_receipt') if isinstance(reply, dict) else None
         if not isinstance(usage, dict) or not isinstance(receipt, dict): return None
@@ -308,7 +313,7 @@ class BillingAdapter:
                 or receipt.get('price_version') != self.config['price_version']
                 or receipt.get('api_version_pin') != self.config['api_version_pin']
                 or receipt.get('authority_id') != self.config['authority_id']
-                or receipt.get('evaluation_phase') != 'T1'
+                or receipt.get('evaluation_phase') != phase
                 or receipt.get('evaluation_authority_sha256') != authority['authority_sha256']
                 or receipt.get('price_evidence_sha256') != authority['price']['evidence_sha256']
                 or receipt.get('price_evidence_date') != authority['price']['as_of_date']
