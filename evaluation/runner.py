@@ -250,6 +250,40 @@ def _require_protected_ports(ports: RunnerPorts, eligibility) -> None:
     _protected_live().require_protected_ports(ports, eligibility)
 
 
+def _t3_leak_check(manifests: list[dict], store: CaptureStore, eligibility, cases) -> dict:
+    """Post-attempt hidden-identifier scan of the actual T3 gateway prompts; never raises.
+
+    'clean' only when every captured provider_request scanned with zero hits.
+    A hit is 'refused'; a missing/unreadable capture, empty scan or absent
+    leak_scan module is 'indeterminate'. Captures are only added, never changed.
+    The scan is cited by plain SHA256 (capture kind 'leak_scan'), not a typed
+    reference, so archive closure over suite reports is unaffected.
+    """
+    import importlib
+    from datetime import datetime, timezone
+    recorded = None
+    try:
+        leak_scan = importlib.import_module(__package__ + '.leak_scan')
+        arms = [arm['receipt_capture'] for manifest in manifests for arm in manifest['results']]
+        refs = leak_scan.requests_from_arm_receipts(store, arms)
+        authority = eligibility.verifier.verify(eligibility.authority_receipt, 'run_owner')
+        recorded = leak_scan.record_leak_scan(
+            store, commitment=eligibility.commitment, freeze=eligibility.freeze, request_refs=refs,
+            host=authority['host'], identity=authority['identity'],
+            observed_at=datetime.now(timezone.utc).isoformat(), cases=list(cases),
+            subject={'phase': 'T3_post_attempt', 'attempt_id': eligibility.suite['attempt_id'],
+                     'arm_receipt_count': len(arms), 'arm_receipts_sha256': digest(arms)})
+        leak_scan.assert_clean(store, recorded['leak_scan'])
+        return {'schema_version': 1, 'status': 'clean', 'leak_scan_sha256': recorded['leak_scan']['sha256'],
+                'hit_count': 0, 'error_type': None}
+    except Exception as exc:
+        dirty = recorded is not None and not recorded['clean']
+        return {'schema_version': 1, 'status': 'refused' if dirty else 'indeterminate',
+                'leak_scan_sha256': recorded['leak_scan']['sha256'] if recorded is not None else None,
+                'hit_count': recorded['hit_count'] if recorded is not None else None,
+                'error_type': None if dirty else type(exc).__name__}
+
+
 def _questions(value: object) -> list[dict]:
     if not isinstance(value, list):
         raise ValueError('questions must be a list')
@@ -503,6 +537,14 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
         report = {'schema_version': 1, 'declaration': predeclared,
                   'manifests': [item['manifest_capture'] for item in manifests],
                   'summary': summarize_suite(manifests)}
+        leak_check = None
+        if protected and mode == 'live' and split == 'heldout':
+            # G1b: the real T3 prompts are scanned before the attempt can be recorded
+            # completed or reported; a hit or an unscannable attempt is never a benchmark.
+            leak_check = _t3_leak_check(manifests, store, eligibility, cases)
+            report['leak_check'] = leak_check
+            if leak_check['status'] != 'clean':
+                report['summary'] = {**report['summary'], 'benchmark_status': 'not_run'}
         capture = store.put('suite_report', report)
         if protected:
             statuses = [item['status'] for manifest in manifests for item in manifest['results']]
@@ -510,6 +552,8 @@ def run_suite(cases: list[VariantCase], ports: RunnerPorts, store: CaptureStore,
                             for manifest in manifests for item in manifest['results'])
             terminal = ('no_output' if no_output else 'failed' if all(status == 'failed' for status in statuses)
                         else 'partial' if any(status != 'completed' for status in statuses) else 'completed')
+            if leak_check is not None and leak_check['status'] != 'clean' and terminal == 'completed':
+                terminal = 'partial'  # Captures/denominators kept; completion is blocked.
             ending = eligibility.finish_suite(terminal, capture, request_id=attempt_request_id + ':finish')
             report['attempt_receipt'] = ending.capture
         return {**report, 'suite_capture': capture}

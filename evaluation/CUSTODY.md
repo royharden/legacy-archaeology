@@ -154,10 +154,15 @@ Nothing beyond the commitment and those cases is read.
 
 An external `isolation_reviewer` signs the `prompt_allowlist` receipt citing the isolation capture's `capture_sha256`. `EligibilityContext.validate()` accepts only `visible_only`, so any hit refuses eligibility. `eligibility.py` is unchanged.
 
-**After the fact.** For a post-attempt re-scan of the T3 attempt itself, reporting callers use `assert_clean(store, leak_scan_ref)`. It refuses results whose scan found a hit.
+**After the fact (T3, wired in `runner.run_suite`).** For a protected live heldout suite, `run_suite` scans the attempt's actual gateway `provider_request` captures after all arms finish and before the `suite_report` is captured or the attempt is finished (`runner._t3_leak_check`, which uses the T0 commitment and the attempt's own heldout cases). The report gains `leak_check`: `{schema_version, status, leak_scan_sha256, hit_count, error_type}`. The scan is cited by plain SHA256 (capture kind `leak_scan`), not a typed reference, so portable-archive closure over suite reports is unaffected. The `isolation_capture` written after the attempt is evidence only; it is bound to the consumed freeze and nonce and is not an allowlist precondition for any new attempt.
+- `clean`: every captured request was scanned with zero hits. `assert_clean` passed.
+- `refused`: a hidden identifier was found.
+- `indeterminate`: a capture was missing or unreadable, the scan was empty, or the `leak_scan` module was absent (fail closed).
+
+For anything other than `clean`, `summary.benchmark_status` is reported as `not_run`, and a terminal `completed` is downgraded to `partial`, so the attempt can never be recorded completed or reported as a benchmark. All captures, failures and denominators are kept, and new `leak_scan`/`isolation_capture` evidence is only added. Public, T1, mock and rules paths are unchanged. Other reporting callers can still run `assert_clean(store, leak_scan_ref)` themselves.
 
 **What it does not do:**
-- Reviewers must check the report's `subject` and `requests` actually cover the attempt or rehearsal being certified; the eligibility check itself only reads `observed_value`. For T3, the allowlist receipt precedes `begin()`, so the scanned prompts are a rehearsal with the frozen prompt pins; the real T3 prompts are guarded afterwards only by `assert_clean`, which no runner/reporting caller invokes yet.
+- Reviewers must check the report's `subject` and `requests` actually cover the attempt or rehearsal being certified; the eligibility check itself only reads `observed_value`. For T3, the allowlist receipt precedes `begin()`, so the scanned prompts are a rehearsal with the frozen prompt pins; the real T3 prompts are then re-scanned automatically by `run_suite` after the attempt (see "After the fact" above).
 - It cannot see prompts that never reached a capture (for example a crash before an arm receipt). Custody of the capture store remains a precondition.
 - It cannot recognise hidden truth paraphrased or re-encoded beyond hex case and truncation, for example as decimal values or base64. Those stay with the human isolation reviewer.
 - Regression source lives in `tests/evaluation/test_leak_scan.py`. It is unexecuted.

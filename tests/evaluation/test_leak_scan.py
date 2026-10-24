@@ -120,6 +120,41 @@ class LeakScan(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differs from T0'):
             self.record([request(self.store, 'x')], cases=[replace(self.probe, batches=self.probe.batches[:0])])
 
+    def manifests_with_request(self, request_ref):
+        """Synthetic manifest whose single arm receipt reaches one gateway request."""
+        raw = self.store.put('arm_raw', {'attempts': [{'request_capture': request_ref}]})
+        receipt = self.store.put('arm_receipt', {'captures': [raw]})
+        return [{'results': [{'receipt_capture': receipt}]}]
+
+    def test_t3_post_attempt_check_clean_on_honest_prompts(self):
+        """what_bug_this_catches: the G1b post-check refuses an honest T3 attempt."""
+        from evaluation.runner import _t3_leak_check
+        report = run_variant(case(), fake_ports(), self.store)
+        check = _t3_leak_check([report], self.store, self.context, [self.probe])
+        self.assertEqual(check['status'], 'clean')
+        L.assert_clean(self.store, {'sha256': check['leak_scan_sha256'], 'kind': 'leak_scan'})
+        # Plain SHA citation: archive closure over the suite report never meets a 'leak_scan' ref.
+        from evaluation.archive import _references
+        self.assertEqual(list(_references(check)), [])
+
+    def test_t3_post_attempt_hit_is_refused_and_keeps_evidence(self):
+        """what_bug_this_catches: a real T3 prompt leaking a hidden hash is still recorded completed/reportable."""
+        from evaluation.runner import _t3_leak_check
+        leaked = request(self.store, heldout(self.context)['canonical_sha256'])
+        check = _t3_leak_check(self.manifests_with_request(leaked), self.store, self.context, [self.probe])
+        self.assertEqual(check['status'], 'refused')
+        self.assertGreater(check['hit_count'], 0)
+        self.assertEqual(self.store.get({'sha256': check['leak_scan_sha256']}, kind='leak_scan')['result'], L.DIRTY)
+
+    def test_t3_post_attempt_missing_capture_is_indeterminate(self):
+        """what_bug_this_catches: an unscannable attempt (missing request capture) passes as clean."""
+        from evaluation.runner import _t3_leak_check
+        missing = {'sha256': 'e' * 64, 'kind': 'provider_request', 'bytes': 10}
+        check = _t3_leak_check(self.manifests_with_request(missing), self.store, self.context, [self.probe])
+        self.assertEqual(check['status'], 'indeterminate')
+        self.assertIsNone(check['leak_scan_sha256'])
+        self.assertEqual(_t3_leak_check([], self.store, self.context, [self.probe])['status'], 'indeterminate')
+
     def test_attempt_scope_requires_a_terminal_attempt(self):
         """what_bug_this_catches: a running/absent attempt is certified from partial captures."""
         with self.assertRaisesRegex(ValueError, 'terminal recorded attempt'):
