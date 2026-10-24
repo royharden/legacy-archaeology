@@ -125,3 +125,39 @@ All new regression source is unexecuted. The custody-signature tests additionall
 need the optional `cryptography` dependency at later authorized setup; no package
 was installed or imported for this construction. Fixed synthetic test seeds are
 test-only data, never operational credentials or observed custody receipts.
+
+## Captured-prompt hidden-identifier scan (leak_scan.py)
+
+The plan requires logging the exact provider prompts and scanning captures for hidden identifiers. `evaluation/leak_scan.py` is that scanner, as source only; it has not been run.
+
+**What it matches.** Matching is exact or substring only, never fuzzy:
+- every 64-hex window of each hex run (case-insensitive), against the full fingerprints;
+- every 16-hex window at any offset of each fingerprint, so a truncated or sliced hash still counts;
+- heldout variant IDs, case-insensitively, unless glued to a letter or digit: `heldout-00.` and `heldout-00-batch` hit, `xheldout-00x` does not.
+
+**The hidden set.** `hidden_identifiers(commitment, cases=None)` derives it:
+- **From T0:** heldout variant IDs, their `oracle_sha256`, `canonical_sha256` and `layout_sha256`, plus `sealed_assets_sha256`.
+- **From evaluator-held heldout cases (optional):** per-row `digest(fields)` for converted rows, and `digest(row)` for every row. Each case's oracle must equal its T0 commitment.
+- **Deliberately excluded:** visible-input hashes (source, samples, brief, visible), which legitimately appear in permitted prompts, and generic hashes of empty or null values such as `digest([])` for an empty layout.
+
+Nothing beyond the commitment and those cases is read.
+
+**Choosing what to scan.** The scanned captures are the gateway `provider_request` captures. Choose them with one of:
+- `attempt_request_refs(store, registry, edition)`, which walks one TERMINAL protected attempt (arm receipt → `arm_raw.attempts[].request_capture`);
+- `requests_from_arm_receipts(store, arm_refs)`, for any explicit arm receipts such as a T1 or validation rehearsal with the frozen prompt pins.
+
+**Limits.** Inputs are bounded: 512 requests, 1 MiB each, 64 MiB in total, 20,000 fingerprints. An empty or non-request scan refuses. The fragment index holds 49 entries per fingerprint (about 800k, roughly 100 MB at realistic heldout sizes); hits are deduplicated while scanning, so a dirty scan's memory stays bounded by distinct hit groups.
+
+**What `record_leak_scan(...)` writes.** It writes two immutable captures and signs nothing:
+1. **`leak_scan`:** the closed report. It holds the identifier-set hash, counts, an optional bounded `subject` naming what was scanned (attempt ID, arm receipts), method, scanner code hash, scanned refs, `hit_count` (distinct request/category/match groups) and `occurrence_count` (matching windows: one 20-hex leaked fragment counts as 5), at most 100 hits and `result`. Hits keep only a category, match kind and request hash; hidden values are never copied into the report.
+2. **`isolation_capture` (kind `prompt_allowlist`):** its subject is that report. `observed_value` is `visible_only` only when there are zero hits; otherwise it is `hidden_identifier_found`.
+
+An external `isolation_reviewer` signs the `prompt_allowlist` receipt citing the isolation capture's `capture_sha256`. `EligibilityContext.validate()` accepts only `visible_only`, so any hit refuses eligibility. `eligibility.py` is unchanged.
+
+**After the fact.** For a post-attempt re-scan of the T3 attempt itself, reporting callers use `assert_clean(store, leak_scan_ref)`. It refuses results whose scan found a hit.
+
+**What it does not do:**
+- Reviewers must check the report's `subject` and `requests` actually cover the attempt or rehearsal being certified; the eligibility check itself only reads `observed_value`. For T3, the allowlist receipt precedes `begin()`, so the scanned prompts are a rehearsal with the frozen prompt pins; the real T3 prompts are guarded afterwards only by `assert_clean`, which no runner/reporting caller invokes yet.
+- It cannot see prompts that never reached a capture (for example a crash before an arm receipt). Custody of the capture store remains a precondition.
+- It cannot recognise hidden truth paraphrased or re-encoded beyond hex case and truncation, for example as decimal values or base64. Those stay with the human isolation reviewer.
+- Regression source lives in `tests/evaluation/test_leak_scan.py`. It is unexecuted.
