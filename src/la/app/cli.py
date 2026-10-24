@@ -48,6 +48,9 @@ def parser():
     q.add_argument('--revision', type=int, required=True); q.add_argument('--request-id', required=True)
     q = sub.add_parser('approve'); q.add_argument('run')
     q.add_argument('--actor', required=True); q.add_argument('--reason', required=True)
+    q = sub.add_parser('prepare-samples'); q.add_argument('run'); q.add_argument('--input-root', default='.')
+    q.add_argument('--selections', required=True, help='explicit JSON list of {ordinal[,start,end][,record_raw_sha256]}')
+    q.add_argument('--authorization', required=True, help='nonblank provenance label; not provider permission')
     q = sub.add_parser('declare-filler'); q.add_argument('run'); q.add_argument('--spans', required=True)
     q.add_argument('--actor', required=True); q.add_argument('--reason', required=True)
     q = sub.add_parser('report'); q.add_argument('run')
@@ -239,6 +242,16 @@ def _execute(args):
                     bundle_stages=stage_inventory(within(run,'bundles')) if within(run,'bundles').exists() else [],
                     cleanup_performed=False, decision_authority='SQLite ruling journal')
     run, batch, brief = load_run(root, args.run)
+    if args.command == 'prepare-samples':
+        from la.ingest.sample_prep import prepare_permitted_samples
+        selections = read(within(Path(args.input_root).resolve(), args.selections, exists=True))
+        artifact, prepared = prepare_permitted_samples(batch, selections, args.authorization)
+        # Content-addressed below the store root, outside run members; it only
+        # takes effect when supplied to a fresh `la ingest` (a new run identity).
+        path = within(root, 'prepared-samples/'+prepared['content_sha256']+'.json')
+        immutable(path, artifact)
+        return dict(run=args.run, prepared_samples=str(path),
+                    receipt=receipt(root, 'sample-preparation', prepared), states=empty_states())
     if args.command == 'provider-export':
         from la.providers.accounting import CallLedger
         ledger = within(root, 'provider-accounting.sqlite', exists=True)

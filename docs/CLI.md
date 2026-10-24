@@ -27,6 +27,20 @@ la --root .la-runs provider-export RUN
 manifest are rechecked on each operation. Incomplete mapping exports remain
 non-loadable; preview may show resolved values and unresolved/quarantine evidence.
 Only transform requires and records the current complete-mapping approval.
+
+To author a permitted-sample artifact from an existing run instead of by hand:
+
+```console
+la --root .la-runs prepare-samples RUN --input-root inputs --selections selections.json --authorization "who permitted these bytes and why"
+cp .la-runs/prepared-samples/CONTENT_SHA256.json inputs/samples-prepared.json   # byte-exact copy
+la --root .la-runs ingest source.dat --input-root inputs --brief brief.md --samples samples-prepared.json
+```
+
+`selections.json` is an explicit list such as `[{"ordinal": 0}, {"ordinal": 3, "start": 4, "end": 8}]`.
+The prepared artifact is published once under `prepared-samples/` with a
+`sample-preparation/` receipt; the original run is unchanged. Re-ingesting with it
+creates a new run identity. See `src/la/ingest/INPUT-GUIDE.md` section 2a.
+
 Re-answering a question changes the mapping lineage and invalidates its prior
 approval. Unknown stays unresolved, distinct from an explicitly selected null.
 Earlier approvals/bundles/reports remain immutable. An interrupted intake completes
