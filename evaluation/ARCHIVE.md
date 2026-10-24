@@ -125,5 +125,6 @@ Full semantic validation, including catalog snapshots, binding and lineage, is D
 - Every path above is unexecuted. Ed25519, ZIP round-trips, registry folds and scorer compatibility have not been exercised.
 - The hidden-data scan is content-based (`split`, `evaluation_phase` and `visibility` keys at any depth) and refuses the whole archive on any marked capture. An unmarked hidden capture reachable only from unmarked parents, for example a history edge straight to an unmarked raw output, would not be caught. Producers must keep these markers on receipts, manifests and declarations.
 - Registry history in the manifest is metadata: event payloads, hashes and IDs. Commitment hashes of heldout variants are treated as non-secret, matching T1 catalog practice.
+- Editions with T3 (`t3_*`) history fold only where `evaluation/protected_live.py` is importable; without it, planning or reading such a retired edition refuses (fail closed).
 - Custody of the archive file and of the evaluator store is an OS/operator concern. These checks establish identity, not custody.
 - Future regression source: `tests/evaluation/test_archive.py`. It has not been run.

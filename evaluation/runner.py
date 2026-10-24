@@ -153,8 +153,8 @@ class RequestGateway:
     def request(self, purpose: str, candidates: list[dict] | None = None) -> object:
         if self.busy or len(self.attempts) >= ARMS[self.method]['max_requests']:
             raise ValueError('request budget/single-flight violation')
-        if any(item.get('cost_status') == 'unknown' for item in self.attempts):
-            raise ValueError('unknown liability: no automatic further request')
+        if any(item.get('cost_status') == 'unknown' or item.get('t3_overrun') for item in self.attempts):
+            raise ValueError('unknown liability/T3 overrun: no automatic further request')
         if self.ports.provider is None:
             raise ValueError('provider port unavailable; no silent fallback')
         prompt = {'purpose': purpose, 'input': _prompt_input(self.visible)}
@@ -223,7 +223,7 @@ class RequestGateway:
             overrun = _t3_overrun_cost(exc)
             if overrun is not None:
                 # Truthfully settled T3 overrun: the registry holds this known cost too.
-                item.update(cost_status='known', known_cost=overrun)
+                item.update(cost_status='known', known_cost=overrun, t3_overrun=True)
             # Exception messages may contain DSNs/keys from external adapters.
             raise
         finally:

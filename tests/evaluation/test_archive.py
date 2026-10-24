@@ -153,8 +153,11 @@ class PortableArchive(unittest.TestCase):
 
     def test_registry_folds_nonempty_history_without_t3_module_installed(self):
         """what_bug_this_catches: the lazy T3 hook import breaks every non-T3 registry fold."""
+        import sys
+        from unittest import mock
         from custody_support import synthetic_context
-        with TemporaryDirectory() as directory:
+        # A None entry makes import_module raise ModuleNotFoundError for exactly this name.
+        with TemporaryDirectory() as directory, mock.patch.dict(sys.modules, {'evaluation.protected_live': None}):
             store = CaptureStore(directory)
             context, probe = synthetic_context(directory, store)
             state = context.registry.state(probe.edition)
@@ -163,6 +166,9 @@ class PortableArchive(unittest.TestCase):
             self.assertIsNone(state['t3'])
             snapshot = context.registry.snapshot()
             self.assertEqual(snapshot['head'], snapshot['events'][-1]['event_sha256'])
+            with self.assertRaisesRegex(ValueError, 'protected T3 live module unavailable'):
+                context.registry._append(probe.edition, 't3_scope_admitted', {}, request_id='t3-absent',
+                                         expected_head=snapshot['head'])
 
     def test_unmarked_children_of_hidden_capture_never_ship(self):
         """what_bug_this_catches: raw provider requests under a heldout receipt lack markers and leak."""
