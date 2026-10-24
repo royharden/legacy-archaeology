@@ -93,11 +93,21 @@ def t3_precheck(protected,cases,config,*,target_factory=None):
         raise ValueError('target freeze pin differs from the frozen T2 freeze')
     attempt=config['attempt_request_id']
     used={event['request_id'] for event in protected.registry.events()}
-    if attempt==config['t3_admission_request_id'] or {attempt,attempt+':finish',attempt+':failure'}&used:
+    derived={attempt,attempt+':finish',attempt+':failure'}
+    if config['t3_admission_request_id'] in derived or derived&used:
         raise ValueError('attempt request id collides with an admission or existing registry request')
     ledger=CallLedger(Path(config.get('port_context',{}).get('ledger_path','.la-runs/evaluator-provider.sqlite')))
-    if ledger.snapshot()['unknown_attempt_ids']:
+    snapshot=ledger.snapshot()
+    if snapshot['unknown_attempt_ids']:
         raise ValueError('D7 provider ledger has an open reserved/unknown liability; reconcile or fence it first')
+    # With no open liability, known cost is the ledger's whole liability; every
+    # signed T3 request must still fit the shared lifetime cap (T1 spend counts too).
+    from la.providers.accounting import amount
+    billing=config['port_context']['provider_config']
+    per_call=(billing['max_input_tokens']*amount(billing['input_usd_per_million'])
+              +billing['max_output_tokens']*amount(billing['output_usd_per_million']))/1000000
+    if amount(snapshot['known_cost_usd'])+scope['caps']['max_total_requests']*per_call>amount(billing['total_cap_usd']):
+        raise ValueError('D7 ledger total_cap_usd cannot cover the worst-case signed T3 reservations')
 
 
 def admit_t3(protected,config):

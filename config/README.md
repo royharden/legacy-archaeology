@@ -49,8 +49,8 @@ signed suite authority pins as `spend_authority_sha256`. The factory verifies an
 retains it, then returns D6's `ProtectedLiveContext`. `scripts/eval.py` accepts it
 only for `--mode live --split heldout --ports scripts.product_ports:factory`. Admission
 is irreversible (one scope per edition), so every run_suite/provider_port precondition
-(8 declared cases, batch shape, malformed stratum, T0 identities, freeze/pins, request id collisions, target freeze pin, single supported provider, OPENAI_API_KEY presence, B1 provider-text byte bound, no open D7 ledger liability
-ids) and a dry-run ports build are checked first. It then records `t3_scope_admitted`
+(8 declared cases, batch shape, malformed stratum, T0 identities, freeze/pins, request id collisions, target freeze pin, single supported provider, OPENAI_API_KEY presence, B1 provider-text byte bound, no open D7 ledger liability,
+worst-case T3 reservations within the ledger cap) and a dry-run ports build are checked first. It then records `t3_scope_admitted`
 with `t3_admission_request_id` at `expected_registry_head` (the head the scope was signed
 against) and starts the suite at the admission event head. If a run stopped after
 admission with no attempt or calls, rerun with `t3_resume_registry_head` set to the
