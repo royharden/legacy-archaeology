@@ -111,7 +111,9 @@ def provider_port(*, config, ledger_path, run,trusted_authority=None):
                         provider='offline-simulation', model=None, price_sha256=None, mode=mode)
         if config is None:
             raise ValueError('live evaluator requires verified explicit config')
-        text = preflight_text(envelope)
+        # Use the same serializer as preflight. generate_once independently
+        # validates config and the final byte bound immediately before reserve.
+        text = provider_text(method, prompt)
         namespace=(run if trusted_authority is None else phase+':'+digest(dict(
             authority_sha256=trusted_authority['authority_sha256'],attempt_id=trusted_authority['attempt_id'],run=run)))
         result = generate_once(text, config, ledger_path,
