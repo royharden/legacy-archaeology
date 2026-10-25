@@ -24,6 +24,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.timeout < 1:
         parser.error('--timeout must be positive')
+    caller_cwd = str(Path.cwd())
     # Each invocation retains a distinct receipt, including failures and timeouts.
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     output = args.out.resolve() / stamp
@@ -44,12 +45,13 @@ def main(argv=None):
         status = 'completed'
         with (output/(suite+'.log')).open('wb') as log:
             try:
-                code = subprocess.run(command, cwd=ROOT, env=environment, stdout=log,
+                code = subprocess.run(command, env=environment, stdout=log,
                                       stderr=subprocess.STDOUT, timeout=args.timeout,
                                       check=False).returncode
             except subprocess.TimeoutExpired:
                 code, status = None, 'timeout'
-        result = dict(suite=suite, command=command, returncode=code, status=status,
+        result = dict(suite=suite, command=command, cwd=caller_cwd,
+                      returncode=code, status=status,
                       elapsed_seconds=round(time.monotonic()-start, 3),
                       log=suite+'.log',
                       log_sha256=hashlib.sha256((output/(suite+'.log')).read_bytes()).hexdigest())
@@ -57,7 +59,7 @@ def main(argv=None):
         print(json.dumps(result), flush=True)
     passed = bool(results) and all(r['returncode'] == 0 for r in results)
     receipt = dict(schema_version=1, scope='public-keyless-local', python=sys.version,
-                   executable=sys.executable, suites=results, passed=passed,
+                   executable=sys.executable, cwd=caller_cwd, suites=results, passed=passed,
                    target_validation='not_run', hidden_benchmark='not_run')
     (output/'results.json').write_text(json.dumps(receipt, indent=2)+'\n', encoding='utf-8')
     print('Receipt: '+str(output/'results.json'), flush=True)
