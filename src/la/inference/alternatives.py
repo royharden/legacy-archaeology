@@ -67,11 +67,14 @@ def compatible_targets(raws: list[bytes], brief: str) -> list[str]:
 def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tuple[list[dict], dict]:
     """At most three complete policies per physical-field/semantic-name option.
 
-    Axes are recorded separately; three deterministic diagonals deliberately do
+    Axes are recorded separately; bounded prioritized proposals deliberately do
     not pretend to exhaust their Cartesian product. Unknown is always required.
     """
-    observed_left = any(raw.startswith(b' ') for raw in raws)
-    observed_right = any(raw.endswith(b' ') for raw in raws)
+    # A blank lexeme has no token edge from which to infer a padding side.
+    # It still participates in the separate sentinel/null alternatives below.
+    padding_observations = [raw for raw in raws if raw.strip(b' ')]
+    observed_left = any(raw.startswith(b' ') for raw in padding_observations)
+    observed_right = any(raw.endswith(b' ') for raw in padding_observations)
     sides = ['left', 'none', 'right'] if observed_left and not observed_right else ['right', 'none', 'left'] if observed_right and not observed_left else ['left', 'right', 'none'] if observed_left else ['none', 'left', 'right']
     padding = [{'padding_byte': ' ', 'padding_side': side, 'trim': side != 'none'} for side in sides]
     # Prefer an observed sign but expose all supported modes as explicit options.
@@ -117,6 +120,18 @@ def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tup
         if target == 'status' and vocabulary['codes'] is not None:
             policy['allowed_codes'] = vocabulary['codes']
         if policy not in alternatives: alternatives.append(policy)
+    if target in ('account_ref', 'description', 'status') and sentinel_values:
+        # Preserve blank/empty/null distinctions instead of spending the sole
+        # no-trim option on NULL and silently removing literal preservation.
+        # An unobserved opposite-side trim stays an explicitly omitted choice.
+        preserve = {'padding_byte': ' ', 'padding_side': 'none', 'trim': False, 'nullable': False}
+        trim = dict(padding[0], nullable=False)
+        null = dict(padding[0], nullable=True, sentinels={value: 'null' for value in sentinel_values})
+        alternatives = []
+        for policy in (preserve, trim, null):
+            if target == 'status' and vocabulary['codes'] is not None:
+                policy['allowed_codes'] = vocabulary['codes']
+            if policy not in alternatives: alternatives.append(policy)
     combinations = 1
     for values in axes.values(): combinations *= len(values)
     diagnostics = {'axes': axes, 'policy_option_count': len(alternatives),
