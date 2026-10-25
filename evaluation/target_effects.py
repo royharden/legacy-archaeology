@@ -125,6 +125,8 @@ class TargetExpectation:
         connect_host = target['connection_host'] if forwarded else target['host']
         connect_port = target['connection_port'] if forwarded else target['port']
         if forwarded:
+            if not isinstance(target['host'], str) or '%' in target['host']:
+                raise ValueError('literal observed server IP required')
             try:
                 address = ip_address(target['host'])
             except (ValueError, TypeError) as exc:
