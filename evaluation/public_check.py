@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from .artifacts import CaptureStore, digest
+from .answer_policy import offered_policy_matches
 from .corpus import build_development_variant, development_layouts, variant_case
 from .runner import run_suite, replay_archive
 
@@ -35,9 +36,7 @@ def public_answers(case, ports):
             candidate = candidates.get(option['id'])
             if candidate is None:
                 continue
-            keys = ('start', 'end', 'semantic_target', 'data_type', 'policy')
-            if any(all(candidate.get(key) == field.get(key) for key in keys)
-                   for field in case.expected_layout or []):
+            if any(offered_policy_matches(candidate, field) for field in case.expected_layout or []):
                 selected = option['id']
                 break
         answer_policy[question['id']] = selected
