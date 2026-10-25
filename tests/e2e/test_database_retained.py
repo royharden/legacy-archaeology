@@ -196,6 +196,11 @@ class RetainedDatabaseJourney(unittest.TestCase):
                 authority = sign(body)
                 config = replace(self.config_base, authority_reference=body['authority_sha256'],
                                  expected_candidate_sha256=artifact['descriptor']['candidate_sha256'])
+                self.capture(method + '-public-reproduction-inputs', dict(
+                    artifact=artifact, signed_authority=authority, target_config=config.public(),
+                    artifact_sha256=digest(artifact), authority_envelope_sha256=digest(authority),
+                    observer_code_sha256=observer_code_pin(), trusted_issuers=verifier.trusted_issuers,
+                    public_keys_hex={key: value.hex() for key, value in verifier.public_keys.items()}))
                 kwargs = dict(dsn=self.dsn, target_config=config, authority_verifier=verifier)
                 capture_root = self.root / ('facade-' + method); capture_root.mkdir()
                 manifest = collect_target_experiment(artifact, authority, capture_root=capture_root,
