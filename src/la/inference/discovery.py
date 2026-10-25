@@ -52,7 +52,7 @@ def discover_fields(batch: dict) -> dict:
             left, right = _class(raw[position - 1]), _class(raw[position])
             if left != right and left != 'sign' and right != 'sign': counts['class_transition'] += 1
             if (left == 'space') != (right == 'space'): counts['padding_transition'] += 1
-            if right == 'sign' and left != 'space': counts['leading_sign'] += 1
+            if right == 'sign': counts['leading_sign'] += 1
             if left == 'sign' and right != 'digit': counts['trailing_sign'] += 1
         if counts and max(counts.values()) * 4 >= len(rows) * 3:
             proposals[position] = dict(sorted(counts.items()))
@@ -86,6 +86,31 @@ def discover_fields(batch: dict) -> dict:
         if all(raw[start:end] == b' ' * (end - start) for raw in rows):
             if index: offer(points[index - 1], end, 'right_padding_alternative', len(rows))
             if index + 2 < len(points): offer(start, points[index + 2], 'left_padding_alternative', len(rows))
+    # A text field can contain words, spaces and digits. Internal transitions
+    # are competing boundaries, not proof that every token is a separate field.
+    # Offer a small set of enclosing text intervals, using only byte profiles.
+    forbidden = [0]
+    letters = [0]
+    text_edges = {0, width}
+    for position, profile in enumerate(profiles):
+        counts = profile['class_counts']
+        forbidden.append(forbidden[-1] + counts.get('sign', 0) + counts.get('other', 0))
+        letters.append(letters[-1] + int(counts.get('letter', 0) * 4 >= len(rows) * 3))
+        if counts.get('sign', 0) * 4 >= len(rows) * 3:
+            text_edges.add(position)
+        if position and profiles[position - 1]['class_counts'].get('digit', 0) * 4 >= len(rows) * 3 and counts.get('letter', 0) * 4 >= len(rows) * 3:
+            text_edges.add(position)
+    unions = []
+    for index, start in enumerate(points):
+        for end in points[index + 2:]:
+            bad = forbidden[end] - forbidden[start]
+            if letters[end] > letters[start] and bad * 4 <= len(rows):
+                unions.append((start, end, len(rows) - bad))
+    unions.sort(key=lambda item: (-(int(item[0] in text_edges) + int(item[1] in text_edges)),
+                                  -item[2], item[1] - item[0], item[0], item[1]))
+    text_budget = MAX_FIELDS // 4
+    for start, end, support in unions[:text_budget]:
+        offer(start, end, 'enclosing_text_alternative', support)
     for start, end, support in date_spans[:16]:
         offer(start, end, 'calendar_shape_alternative', support)
         left = max((point for point in points if point < start), default=0)
@@ -97,7 +122,7 @@ def discover_fields(batch: dict) -> dict:
         if start and all(raw[start - 1] in b'+-' for raw in rows): offer(start - 1, end, 'leading_sign_token', len(rows))
         if end < width and all(raw[end] in b'+-' for raw in rows): offer(start, end + 1, 'trailing_sign_token', len(rows))
     spans = sorted(ranked.values(), key=lambda item: (
-        -int(any(reason in item['reasons'] for reason in ('stable_transition_segment', 'right_padding_alternative', 'left_padding_alternative'))),
+        -int(any(reason in item['reasons'] for reason in ('stable_transition_segment', 'right_padding_alternative', 'left_padding_alternative', 'enclosing_text_alternative'))),
         -item['support'], item['start'], item['end']))
     selected = spans[:MAX_FIELDS]
     for item in selected:
@@ -111,9 +136,10 @@ def discover_fields(batch: dict) -> dict:
                 date_shape_proposal_count=len(date_spans), date_shape_budget=16,
                 omitted_date_shape_count=max(0, len(date_spans) - 16),
                 support_threshold={'numerator': 3, 'denominator': 4},
-                omitted_span_count=max(0, len(spans) - MAX_FIELDS),
+                omitted_span_count=max(0, len(spans) - MAX_FIELDS) + max(0, len(unions) - text_budget),
                 abstention_reasons=['same_class_adjacency_may_be_missing', 'candidate_presence_not_truth',
                                     'all_policies_require_confirmation'])
     if len(spans) > MAX_FIELDS: base['abstention_reasons'].append('field_budget_exhausted')
     if len(date_spans) > 16: base['abstention_reasons'].append('date_shape_budget_exhausted')
+    if len(unions) > text_budget: base['abstention_reasons'].append('text_union_budget_exhausted')
     return validate_discovery_metadata(dict(base, discovery_sha256=digest(base)))
