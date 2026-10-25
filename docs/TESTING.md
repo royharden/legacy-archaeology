@@ -8,6 +8,9 @@ Use the pinned project Python environment. From any directory:
 
 Select a focused suite with repeated `--suite providers` or `--suite journey` options.
 Each suite runs in a fresh interpreter with this checkout's source and test helpers.
+Subprocesses inherit the caller's working directory; discovery and import roots use
+absolute checkout paths. Both the receipt and each suite result record that actual
+working directory as `cwd`. Under the current run orders, invoke from the OUTER shell.
 The runner continues after a failure, preserves complete logs and their SHA256 hashes,
 records commands and return codes in a unique `results.json`, and exits nonzero if
 any suite fails or times out. A timeout terminates the suite subprocess and remains
