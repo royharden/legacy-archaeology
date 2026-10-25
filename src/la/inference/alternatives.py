@@ -28,6 +28,16 @@ def status_vocabulary(brief: str) -> dict:
             values = [item.strip() for item in match.group(1).split(',')]
             if len(values) <= 64: codes, source = sorted(set(values)), 'explicit_status_code_list'
     if codes is None:
+        # Explicit vocabulary labels may use prose ("A active, C closed").
+        # Require a code and a nonempty label in every comma-separated item;
+        # arbitrary observed status bytes never create a vocabulary.
+        match = re.search(r'\bstatus(?:_codes|\s+vocabulary|\s+codes)\s*[:=]\s*([^\n.;]{1,2000})', brief, re.I)
+        if match:
+            parts = match.group(1).split(',')
+            labels = [re.fullmatch(r'\s*([A-Za-z0-9_-]{1,32})\s+(?:=\s*)?([^,=]+?)\s*', part) for part in parts]
+            if 0 < len(labels) <= 64 and all(labels):
+                codes, source = sorted({label.group(1) for label in labels}), 'explicit_status_labels'
+    if codes is None:
         match = re.search(r'\bstatus\s*\(([^)\n]{1,2000})\)', brief, re.I)
         if match:
             parts = re.split(r'[,;]', match.group(1))
@@ -87,11 +97,18 @@ def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tup
     if target in ('account_ref', 'description', 'status') and sentinel_values:
         if sentinel_values: axes['sentinel'] = ['preserve_or_reject', 'explicit_sql_null']
     alternatives = []
+    # Physical capacity is a finite precision proposal, not a business limit.
+    # The sign consumes a byte but not a decimal digit. Do not advertise an
+    # observed-width axis then silently use only the unrelated maximum38.
+    digit_capacity = max((len(value) - int(value.startswith((b'+', b'-')) or value.endswith((b'+', b'-')))
+                          for value in stripped if re.fullmatch(rb'(?:[+-]?\d+|\d+[+-])', value)), default=1)
+    if target == 'balance':
+        axes['precision'] = sorted({max(3, digit_capacity), 18, 38})
     for index in range(3):
         pad_index = 0 if target in ('balance', 'effective_date') else index % len(padding)
         policy = dict(padding[pad_index], nullable=False)
         if target == 'balance':
-            policy.update(sign=signs[0], scale=axes['scale'][index], precision=max(axes['precision']))
+            policy.update(sign=signs[0], scale=axes['scale'][index], precision=max(3, digit_capacity))
         if target == 'effective_date':
             policy.update(format=formats[index % len(formats)], sentinels={})
             if policy['format'] == 'YYMMDD': policy['century_window'] = CENTURY_WINDOWS[index]
