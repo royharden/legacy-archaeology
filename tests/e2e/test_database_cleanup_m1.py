@@ -5,6 +5,8 @@ the product RESTRICT path. Refused cases, sentinel and all older schemas remain.
 """
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -27,6 +29,90 @@ from postgres.test_controlled_target import phase_intent
 from review.support import fixture, proposal
 
 ADDITION_SHA = 'ad318670c3b02258d60d81570e6ee025d3b74311a0d37e98b85a28ebcef727ad'
+NORMAL_ROLE = ['m1_rv2', False, False, False, False, False]
+
+
+def exact_cell(value):
+    if isinstance(value, Decimal):
+        return dict(type='decimal', value=str(value))
+    if isinstance(value, date):
+        return dict(type=type(value).__name__, value=value.isoformat())
+    if value is None or type(value) in (str, int, bool):
+        return value
+    raise AssertionError('unexpected raw readback cell type: ' + type(value).__name__)
+
+
+def assert_protected_unchanged(case, before, after):
+    """Compare independently observed facts, including retained earlier cases."""
+    case.assertEqual(after, before, 'protected catalog, role or sentinel drift')
+    case.assertEqual(after['role'], NORMAL_ROLE, 'normal M1 role required')
+
+
+def assert_committed_allowlist(case, receipt, saved):
+    """Bind a real receipt to the bytes of the allowlist saved before invocation."""
+    namespace = owned_namespace(saved['namespace'])
+    exact = [f'DROP TABLE "{namespace}"."candidate_execution" RESTRICT',
+             f'DROP TABLE "{namespace}"."migrated_records" RESTRICT',
+             f'DROP SCHEMA "{namespace}" RESTRICT']
+    case.assertEqual(saved['exact_drop_sql'], exact)
+    # Independent wire hash calculation, rather than reusing StatementTrace/digest.
+    expected = [hashlib.sha256(json.dumps({'sql': sql, 'parameters': None},
+        sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+        allow_nan=False).encode('utf-8')).hexdigest() for sql in saved['exact_drop_sql']]
+    case.assertEqual(receipt['state'], 'committed')
+    case.assertEqual(receipt['binding']['namespace'], namespace)
+    case.assertEqual(receipt['transaction']['statements'], expected,
+                     'committed SQL must equal the ordered saved three-RESTRICT allowlist')
+    return expected
+
+
+def assert_rollback_restored(case, before, after, reconciliation):
+    case.assertEqual(after, before, 'rollback failed to restore exact table identities/marker/rows')
+    case.assertEqual(reconciliation['state'], 'observed_present')
+    case.assertEqual(reconciliation['issues'], [], 'reconciliation ownership must be proven')
+
+
+def readonly_cursor_factory(connection, events):
+    """Observe all reconciliation cursors without replacing the native connection.
+
+    Use a separate native cursor for server mode checks so the application's
+    pending result and psycopg's implicit first SET TRANSACTION remain intact.
+    """
+    import psycopg
+
+    class ObservedReadOnlyCursor(psycopg.Cursor):
+        def execute(self, sql, parameters=None, **kwargs):
+            event = dict(sql=sql, parameters=cleanup_module.StatementTrace.wire(parameters),
+                         server_transaction_read_only=None, returned=False)
+            events.append(event)
+            setup = sql == 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY'
+            if not setup:
+                with psycopg.Cursor(connection) as probe:
+                    probe.execute("SELECT current_setting('transaction_read_only')")
+                    event['server_transaction_read_only'] = probe.fetchone()[0]
+                if event['server_transaction_read_only'] != 'on':
+                    raise AssertionError('reconciliation query outside server READ ONLY transaction')
+                if not isinstance(sql, str) or not sql.lstrip().upper().startswith(('SELECT ', 'WITH ')):
+                    raise AssertionError('reconciliation attempted non-query SQL')
+            value = super().execute(sql, parameters, **kwargs)
+            event['returned'] = True
+            if setup:
+                with psycopg.Cursor(connection) as probe:
+                    probe.execute("SELECT current_setting('transaction_read_only')")
+                    event['server_transaction_read_only'] = probe.fetchone()[0]
+                if event['server_transaction_read_only'] != 'on':
+                    raise AssertionError('reconciliation setup failed server READ ONLY')
+            return value
+
+        def executemany(self, *args, **kwargs):
+            events.append(dict(sql='executemany', returned=False))
+            raise AssertionError('reconciliation attempted a batch')
+
+        def copy(self, *args, **kwargs):
+            events.append(dict(sql='copy', returned=False))
+            raise AssertionError('reconciliation attempted COPY')
+
+    return ObservedReadOnlyCursor
 
 
 def public_signers():
@@ -129,21 +215,95 @@ class M1RealCleanup(unittest.TestCase):
             ownership_proof_error=proof_error, protected_sentinel=self.sentinel,
             signed_cleanup_authority=self.cleanup_authority, target_config=self.config.public()))
         self.executed_drops = []
+        self.operation = 0
+        self.protected_before = self.protected_facts()
+        self.save('protected-case-before', self.protected_before)
 
     def save(self, name, value):
         (self.root / (name + '.json')).write_text(json.dumps(value, indent=2), encoding='utf-8')
 
-    def tearDown(self):
+    def protected_facts(self):
+        """Actual per-operation baseline includes prior cases and creation siblings.
+
+        Every namespace identity is protected except this exact authorized one.
+        Member catalogs cover non-system schemas; pg_toast members of the current
+        authorized tables necessarily disappear with those tables.
+        """
         with self.connect() as connection, connection.cursor() as cursor:
-            cursor.execute(f'SELECT value FROM "{self.sentinel}".guard_sentinel')
-            self.assertEqual(cursor.fetchall(), [(self.sentinel_value,)])
-            cursor.execute('SELECT nspname,oid::text FROM pg_namespace WHERE pg_get_userbyid(nspowner)=current_user')
-            after = dict(cursor.fetchall())
-        self.assertTrue(all(after.get(name) == oid for name, oid in self.older.items()))
-        self.save('protected-after', dict(older_namespace_oids_unchanged=True, sentinel_unchanged=True,
-                                        executed_drop_sql=self.executed_drops))
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cursor.execute('SELECT current_user,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls '
+                           'FROM pg_roles WHERE rolname=current_user')
+            role = list(cursor.fetchone())
+            cursor.execute('SELECT nspname,oid::text,pg_get_userbyid(nspowner),nspacl::text '
+                           'FROM pg_namespace WHERE nspname<>%s ORDER BY nspname', (self.namespace,))
+            namespaces = [list(row) for row in cursor.fetchall()]
+            cursor.execute("SELECT n.nspname,c.oid::text,c.relname,c.relkind::text,"
+                           "pg_get_userbyid(c.relowner),c.relacl::text,c.reltoastrelid::text "
+                           "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                           "WHERE n.nspname<>%s AND n.nspname !~ '^pg_' AND n.nspname<>'information_schema' "
+                           "ORDER BY n.nspname,c.relname,c.oid", (self.namespace,))
+            classes = [list(row) for row in cursor.fetchall()]
+            cursor.execute("SELECT n.nspname,t.oid::text,t.typname,t.typtype::text,t.typrelid::text,"
+                           "pg_get_userbyid(t.typowner) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace "
+                           "WHERE n.nspname<>%s AND n.nspname !~ '^pg_' AND n.nspname<>'information_schema' "
+                           "ORDER BY n.nspname,t.typname,t.oid", (self.namespace,))
+            types = [list(row) for row in cursor.fetchall()]
+            sentinel = dict(namespace=self.sentinel, rows=None, observation_error=None)
+            try:
+                cursor.execute(f'SELECT value FROM "{self.sentinel}".guard_sentinel ORDER BY value')
+                sentinel['rows'] = [list(row) for row in cursor.fetchall()]
+            except Exception as exc:
+                sentinel['observation_error'] = dict(type=type(exc).__name__, error=str(exc))
+        return dict(excluded_authorized_namespace=self.namespace, namespaces=namespaces,
+                    classes=classes, types=types, role=role, sentinel=sentinel)
+
+    def protect_operation(self, label):
+        self.operation += 1
+        prefix = f'protected-{self.operation:02d}-{label}'
+        self.protected_before = self.protected_facts()
+        self.save(prefix + '-before', self.protected_before)
+        self.assertEqual(self.protected_before['role'], NORMAL_ROLE)
+        self.assertEqual(self.protected_before['sentinel']['rows'], [[self.sentinel_value]])
+        return prefix
+
+    def verify_protected(self, name):
+        try:
+            after = self.protected_facts()
+        except Exception as exc:
+            self.save(name, dict(observation_error=type(exc).__name__, error=str(exc),
+                                 executed_drop_sql=self.executed_drops))
+            raise
+        # Persist actual observations before asserting, including a failed comparison.
+        self.save(name, dict(actual=after, expected=self.protected_before,
+                             executed_drop_sql=self.executed_drops))
+        assert_protected_unchanged(self, self.protected_before, after)
+
+    def tearDown(self):
+        self.verify_protected('protected-after')
+
+    def rollback_facts(self):
+        """Independent SELECT * readback, never the product's summary/row hashes."""
+        with self.connect() as connection, connection.cursor() as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cursor.execute('SELECT oid::text,pg_get_userbyid(nspowner),nspacl::text '
+                           'FROM pg_namespace WHERE nspname=%s', (self.namespace,))
+            namespace = [list(row) for row in cursor.fetchall()]
+            cursor.execute('SELECT c.oid::text,c.relname,c.relkind::text,pg_get_userbyid(c.relowner),'
+                           'c.reltoastrelid::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace '
+                           'WHERE n.nspname=%s ORDER BY c.relname', (self.namespace,))
+            tables = [list(row) for row in cursor.fetchall()]
+            rows = {}
+            for table in ('candidate_execution', 'migrated_records'):
+                if not any(row[1] == table and row[2] == 'r' for row in tables):
+                    rows[table] = dict(missing=True)
+                    continue
+                cursor.execute(f'SELECT * FROM "{self.namespace}"."{table}" ORDER BY 1,2')
+                rows[table] = dict(columns=[column.name for column in cursor.description],
+                    rows=[[exact_cell(cell) for cell in row] for row in cursor.fetchall()])
+        return dict(namespace=namespace, tables=tables, exact_tables=rows)
 
     def run_cleanup(self, *, authority=None, authority_pin=None, fail_after_first_drop=False):
+        prefix = self.protect_operation('cleanup')
         real_execute = cleanup_module.StatementTrace.execute
         def guarded(trace, sql, parameters=None):
             if sql.lstrip().upper().startswith('DROP'):
@@ -155,27 +315,49 @@ class M1RealCleanup(unittest.TestCase):
                 # Real PostgreSQL 22012 after an actual DROP, in the same transaction.
                 trace.cursor.execute('SELECT 1 / 0')
             return value
-        with self.connect() as writer, self.connect() as observer, patch.object(cleanup_module.StatementTrace, 'execute', guarded):
-            result = cleanup_target_namespace(self.experiment, self.artifact, self.authority,
-                authority or self.cleanup_authority, expected_experiment_sha256=self.manifest['experiment_sha256'],
-                expected_original_observation_sha256=self.original['observation_sha256'],
-                expected_cleanup_authority_sha256=authority_pin or self.cleanup_body['authority_sha256'],
-                target_config=self.config, authority_verifier=self.verifier, cleanup_verifier=self.verifier,
-                connection=writer, observer_connection=observer, receipt_root=self.receipts)
+        try:
+            with self.connect() as writer, self.connect() as observer, patch.object(cleanup_module.StatementTrace, 'execute', guarded):
+                result = cleanup_target_namespace(self.experiment, self.artifact, self.authority,
+                    authority or self.cleanup_authority, expected_experiment_sha256=self.manifest['experiment_sha256'],
+                    expected_original_observation_sha256=self.original['observation_sha256'],
+                    expected_cleanup_authority_sha256=authority_pin or self.cleanup_body['authority_sha256'],
+                    target_config=self.config, authority_verifier=self.verifier, cleanup_verifier=self.verifier,
+                    connection=writer, observer_connection=observer, receipt_root=self.receipts)
+        finally:
+            self.verify_protected(prefix + '-after')
         self.save('result', result)
         return result
 
     def reconcile(self, result):
-        with self.connect() as observer:
-            value = reconcile_target_cleanup(self.experiment, self.artifact, self.authority, self.cleanup_authority,
-                expected_experiment_sha256=self.manifest['experiment_sha256'],
-                expected_original_observation_sha256=self.original['observation_sha256'],
-                expected_cleanup_authority_sha256=self.cleanup_body['authority_sha256'],
-                cleanup_receipt_path=self.receipts / ('cleanup-' + result['cleanup_sha256'] + '.json'),
-                expected_cleanup_sha256=result['cleanup_sha256'], target_config=self.config,
-                authority_verifier=self.verifier, cleanup_verifier=self.verifier,
-                observer_connection=observer, receipt_root=self.receipts)
+        prefix = self.protect_operation('reconcile')
+        events = []
+        try:
+            with self.connect() as observer:
+                native_factory = observer.cursor_factory
+                observer.cursor_factory = readonly_cursor_factory(observer, events)
+                try:
+                    value = reconcile_target_cleanup(self.experiment, self.artifact, self.authority, self.cleanup_authority,
+                        expected_experiment_sha256=self.manifest['experiment_sha256'],
+                        expected_original_observation_sha256=self.original['observation_sha256'],
+                        expected_cleanup_authority_sha256=self.cleanup_body['authority_sha256'],
+                        cleanup_receipt_path=self.receipts / ('cleanup-' + result['cleanup_sha256'] + '.json'),
+                        expected_cleanup_sha256=result['cleanup_sha256'], target_config=self.config,
+                        authority_verifier=self.verifier, cleanup_verifier=self.verifier,
+                        observer_connection=observer, receipt_root=self.receipts)
+                finally:
+                    observer.cursor_factory = native_factory
+        finally:
+            self.save('reconciliation-active-sql', dict(events=events,
+                enforcement='native psycopg cursor factory; server transaction_read_only checked for every query'))
+            self.verify_protected(prefix + '-after')
         self.save('reconciliation', value)
+        self.assertGreater(len(events), 1, 'active reconciliation SQL was not observed')
+        self.assertEqual(events[0]['sql'], 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY')
+        self.assertTrue(all(event.get('returned') and event.get('server_transaction_read_only') == 'on'
+                            for event in events), events)
+        self.assertEqual(value['transaction']['statements'], [])
+        self.assertFalse(value['transaction']['commit_attempted'])
+        self.assertEqual(value['issues'], [])
         return value
 
     def exists(self):
@@ -187,6 +369,8 @@ class M1RealCleanup(unittest.TestCase):
         """what_bug_this_catches: a cleanup success flag hides remaining objects or lost intent."""
         result = self.run_cleanup()
         self.assertEqual(result['state'], 'committed', result)
+        allowlist_path = self.root / 'creation-and-drop-allowlist.json'
+        assert_committed_allowlist(self, result, json.loads(allowlist_path.read_text(encoding='utf-8')))
         self.assertEqual(self.executed_drops, self.allowed_sql)
         self.assertFalse(self.exists())
         final_path = self.receipts / ('cleanup-' + result['cleanup_sha256'] + '.json')
@@ -197,7 +381,8 @@ class M1RealCleanup(unittest.TestCase):
         self.assertEqual(prepared['cleanup_id'], result['cleanup_id'])
         self.assertEqual(prepared['transaction']['statements'], [])
         self.assertEqual(self.reconcile(result)['state'], 'observed_absent')
-        self.save('archive-input', dict(path=str(final_path), cleanup_sha256=result['cleanup_sha256']))
+        self.save('archive-input', dict(path=str(final_path), cleanup_sha256=result['cleanup_sha256'],
+            allowlist_path=str(allowlist_path), allowlist_sha256=hashlib.sha256(allowlist_path.read_bytes()).hexdigest()))
 
     def test_wrong_authority_and_stale_pin_refuse_before_drop(self):
         """what_bug_this_catches: load authority or stale namespace digest grants cleanup."""
@@ -249,20 +434,27 @@ class M1RealCleanup(unittest.TestCase):
         self.assertTrue(result['transaction']['commit_attempted'])
         self.assertFalse(result['transaction']['commit_returned'])
         self.assertFalse(self.exists())
-        before = list(self.executed_drops)
         self.assertEqual(self.reconcile(result)['state'], 'observed_absent')
-        self.assertEqual(self.executed_drops, before)
 
     def test_real_sql_error_rolls_back_drop_and_reconciles_present(self):
         """what_bug_this_catches: transactional DROP failure is reported as committed/absent."""
+        before = self.rollback_facts()
+        self.save('rollback-independent-before', before)
+        self.assertEqual({row[1] for row in before['tables'] if row[2] == 'r'},
+                         {'candidate_execution', 'migrated_records'})
+        self.assertEqual(len(before['exact_tables']['candidate_execution']['rows']), 1)
+        self.assertEqual(len(before['exact_tables']['migrated_records']['rows']), 3)
         result = self.run_cleanup(fail_after_first_drop=True)
+        after = self.rollback_facts()
+        self.save('rollback-independent-after', after)
         self.assertEqual(result['state'], 'rolled_back', result)
         self.assertEqual(result['transaction']['sqlstate'], '22012')
         self.assertTrue(result['transaction']['rollback_returned'])
         self.assertFalse(result['transaction']['commit_attempted'])
         self.assertEqual(self.executed_drops, self.allowed_sql[:1])
         self.assertTrue(self.exists())
-        self.assertEqual(self.reconcile(result)['state'], 'observed_present')
+        reconciliation = self.reconcile(result)
+        assert_rollback_restored(self, before, after, reconciliation)
 
     def test_operator_cli_plan_run_inspect_reconcile(self):
         """what_bug_this_catches: library cleanup works but the explicit operator path cannot run."""
@@ -284,22 +476,54 @@ class M1RealCleanup(unittest.TestCase):
         base = [sys.executable, '-B', '-m', 'scripts.cleanup', '--operator-root', str(self.root)]
         trust = ['--grant', 'grant.json', '--public-trust-root', str(self.root), '--public-trust-profile', 'public-trust.json']
         def cli(command, extra):
-            result = subprocess.run(base + [command] + extra, capture_output=True, text=True, timeout=60)
+            env = dict(os.environ)
+            if command == 'reconcile':
+                # Enforce read-only even before the product sets its transaction mode.
+                env['PGOPTIONS'] = '-c default_transaction_read_only=on'
+            result = subprocess.run(base + [command] + extra, env=env, capture_output=True, text=True, timeout=60)
             self.save('cli-' + command, dict(argv=base + [command] + extra, exit_code=result.returncode,
-                                            stdout=result.stdout, stderr=result.stderr, cwd=str(Path.cwd())))
+                stdout=result.stdout, stderr=result.stderr, cwd=str(Path.cwd()),
+                readonly_pgoptions=env.get('PGOPTIONS') if command == 'reconcile' else None))
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
         plan = cli('plan', trust + ['--authority-id', self.cleanup_body['authority_id'], '--operations', 'cleanup', 'reconcile_cleanup'])
         self.assertEqual(plan['unsigned_cleanup_authority_body'], self.cleanup_body)
-        result = cli('run', trust + ['--expected-namespace', self.namespace, '--dsn-env', 'M1_RV2_CLEANUP_DSN'])
+        prefix = self.protect_operation('cli-run')
+        try:
+            result = cli('run', trust + ['--expected-namespace', self.namespace, '--dsn-env', 'M1_RV2_CLEANUP_DSN'])
+        finally:
+            self.verify_protected(prefix + '-after')
+        saved_path = self.root / 'creation-and-drop-allowlist.json'
+        saved = json.loads(saved_path.read_text(encoding='utf-8'))
+        final_path = self.receipts / ('cleanup-' + result['cleanup_sha256'] + '.json')
+        committed_receipt = open_target_cleanup(final_path, expected_cleanup_sha256=result['cleanup_sha256'])
+        self.save('cli-actual-committed-receipt', committed_receipt)
+        expected_hashes = assert_committed_allowlist(self, committed_receipt, saved)
+        self.save('cli-committed-allowlist-link', dict(allowlist_path=str(saved_path),
+            allowlist_file_sha256=hashlib.sha256(saved_path.read_bytes()).hexdigest(),
+            exact_drop_sql=saved['exact_drop_sql'], expected_statement_sha256=expected_hashes,
+            actual_statement_sha256=committed_receipt['transaction']['statements'], cleanup_sha256=result['cleanup_sha256'],
+            sql_observation='committed subprocess receipt StatementTrace hashes; no in-process DROP counter claim'))
         self.assertEqual(result['state'], 'committed', result)
         self.assertFalse(self.exists())
         relative = 'receipts/cleanup-' + result['cleanup_sha256'] + '.json'
         inspected = cli('inspect', ['--receipt', relative, '--expected-cleanup-sha256', result['cleanup_sha256']])
-        self.assertEqual(inspected['state'], 'committed')
-        later = cli('reconcile', trust + ['--expected-namespace', self.namespace, '--dsn-env', 'M1_RV2_CLEANUP_DSN',
-                    '--receipt', relative, '--expected-cleanup-sha256', result['cleanup_sha256']])
+        self.assertEqual(inspected, result)
+        self.assertEqual(inspected['statements_executed'], len(expected_hashes))
+        prefix = self.protect_operation('cli-reconcile')
+        try:
+            later = cli('reconcile', trust + ['--expected-namespace', self.namespace, '--dsn-env', 'M1_RV2_CLEANUP_DSN',
+                        '--receipt', relative, '--expected-cleanup-sha256', result['cleanup_sha256']])
+        finally:
+            self.verify_protected(prefix + '-after')
+        later_receipt = open_target_cleanup(self.receipts / ('cleanup-' + later['cleanup_sha256'] + '.json'),
+                                           expected_cleanup_sha256=later['cleanup_sha256'])
+        self.save('cli-actual-reconciliation-receipt', later_receipt)
         self.assertEqual(later['state'], 'observed_absent')
+        self.assertTrue(later_receipt['after']['read_only'])
+        self.assertEqual(later_receipt['issues'], [])
+        self.assertEqual(later_receipt['transaction']['statements'], [])
+        self.assertFalse(later_receipt['transaction']['commit_attempted'])
 
 
 if __name__ == '__main__': unittest.main()

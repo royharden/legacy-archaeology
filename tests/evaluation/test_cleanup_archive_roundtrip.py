@@ -5,6 +5,7 @@ receipt comes from real PostgreSQL; neither archive nor replay connects to it.
 All generated artifacts are retained in the explicitly supplied evidence root.
 """
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,21 @@ class RealCleanupArchive(unittest.TestCase):
             self.skipTest('exact actual cleanup receipt handoff required')
         index = json.loads(Path(os.environ['M1_RV2_CLEANUP_ARCHIVE_INPUT']).read_text())
         self.receipt = open_target_cleanup(Path(index['path']), expected_cleanup_sha256=index['cleanup_sha256'])
+        # This is the exact allowlist captured before the real DROP, not a list
+        # reconstructed from a receipt after the destructive operation.
+        saved_bytes = Path(index['allowlist_path']).read_bytes()
+        self.assertEqual(hashlib.sha256(saved_bytes).hexdigest(), index['allowlist_sha256'])
+        saved = json.loads(saved_bytes)
+        namespace = self.receipt['binding']['namespace']
+        self.assertEqual(saved['namespace'], namespace)
+        self.assertEqual(saved['exact_drop_sql'], [
+            f'DROP TABLE "{namespace}"."candidate_execution" RESTRICT',
+            f'DROP TABLE "{namespace}"."migrated_records" RESTRICT',
+            f'DROP SCHEMA "{namespace}" RESTRICT'])
+        expected = [hashlib.sha256(json.dumps(dict(sql=sql, parameters=None), sort_keys=True,
+            separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()
+            for sql in saved['exact_drop_sql']]
+        self.assertEqual(self.receipt['transaction']['statements'], expected)
         self.assertEqual(self.receipt['state'], 'committed')
         self.assertEqual((self.receipt['target_validation'], self.receipt['row_parity'],
                           self.receipt['product_acceptance']), ('not_run', 'not_run', 'pending'))
