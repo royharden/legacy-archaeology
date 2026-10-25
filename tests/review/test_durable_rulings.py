@@ -1,6 +1,7 @@
 """what_bug_this_catches: partial commits, stale retries, broken CAS and replay drift."""
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -42,10 +43,10 @@ class DurableRulings(unittest.TestCase):
 
     def test_failure_before_receipt_commit_leaves_no_event_or_projection(self):
         # A receipt failure must roll back event + projection in the same transaction.
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db, db:
             db.execute("CREATE TRIGGER fail_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'injected precommit crash'); END")
         with self.assertRaises(sqlite3.IntegrityError): self.answer()
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db, db:
             for table in ('events', 'projection', 'receipts'):
                 self.assertEqual(db.execute('SELECT count(*) FROM ' + table).fetchone()[0], 0)
 
@@ -54,12 +55,12 @@ class DurableRulings(unittest.TestCase):
         original = self.store.projection(self.generation)
         restarted = RulingStore(self.store.path)
         self.assertEqual(restarted.replay(self.generation), original)
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db, db:
             db.execute('DELETE FROM projection')
         with self.assertRaises(ValueError): restarted.projection(self.generation)
         self.assertEqual(restarted.replay(self.generation, rebuild=True), original)
         self.assertEqual(restarted.projection(self.generation), original)
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db, db:
             with self.assertRaises(sqlite3.IntegrityError): db.execute('UPDATE events SET payload=?', ('{}',))
             with self.assertRaises(sqlite3.IntegrityError): db.execute('DELETE FROM events')
 
@@ -163,14 +164,14 @@ class DurableRulings(unittest.TestCase):
 
     def test_failed_answer_does_not_advance_committed_state_token(self):
         before = self.store.current_state()
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db, db:
             db.execute("CREATE TRIGGER fail_atomic_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'fail'); END")
         with self.assertRaises(sqlite3.IntegrityError): self.answer()
         self.assertEqual(self.store.current_state(), before)
 
     def test_legacy_active_binding_migrates_without_inventing_generation_payload(self):
         old_path = self.root / 'legacy.sqlite'
-        with sqlite3.connect(old_path) as db:
+        with closing(sqlite3.connect(old_path)) as db, db:
             db.execute('CREATE TABLE active(singleton INTEGER PRIMARY KEY,binding TEXT NOT NULL)')
             db.execute('INSERT INTO active VALUES(1,?)', (digest(self.generation),))
         migrated = RulingStore(old_path)

@@ -42,7 +42,8 @@ def development_layouts() -> list[dict]:
                          'precision': 7, 'sign': sign, 'padding_side': 'none', 'padding_byte': ' ',
                          'trim': False, 'nullable': False}),
             'effective_date': (date_width, 'date', {'format': representation, 'padding_side': 'none',
-                         'century_window': [1970, 2069], 'nullable': True, 'padding_byte': ' ',
+                         **({'century_window': [1970, 2069]} if representation == 'YYMMDD' else {}),
+                         'nullable': True, 'padding_byte': ' ',
                          'trim': False, 'sentinels': {sentinel: 'null'}}),
             'status': (1, 'text', {'padding_side': 'none', 'padding_byte': ' ', 'trim': False,
                                   'nullable': False, 'allowed_codes': ['A', 'C']}),
@@ -91,9 +92,11 @@ def _malformed(raw: bytes, kind: str, layout: dict) -> bytes:
     return raw[:start] + bytes(token) + raw[end:]
 
 
-def build_development_variant(variant_id: str, *, edition: str = 'public-development-v2') -> dict:
+def build_development_variant(variant_id: str, *, edition: str = 'public-development-v3') -> dict:
     if not edition.startswith('public-development-'):
         raise ValueError('local construction may only create public development editions')
+    if edition == 'public-development-v2':
+        raise ValueError('retired v2 metadata requires its preserved captures/code; current builder is v3')
     choices = {item['variant_id']: item for item in development_layouts()}
     if variant_id not in choices:
         raise ValueError('unknown public development layout')

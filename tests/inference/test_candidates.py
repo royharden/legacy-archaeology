@@ -56,13 +56,14 @@ class CandidateRegressionSource(unittest.TestCase):
 
     def test_declared_scale_and_sign_primitives_have_explicit_complete_policies(self):
         """what_bug_this_catches: a guessed sign default silently invalidates two of the three scales."""
-        for raw, sign in ((b'+0012', 'leading'), (b'0012-', 'trailing'), (b'00012', 'unsigned')):
+        for raw, sign, precision in ((b'+0012', 'leading', 4), (b'0012-', 'trailing', 4),
+                                     (b'00012', 'unsigned', 5)):
             with self.subTest(sign=sign):
                 policies, metadata = policy_alternatives([raw], 'balance', status_vocabulary(BRIEF))
                 self.assertEqual({policy['scale'] for policy in policies}, {0, 2, 3})
                 self.assertEqual({policy['sign'] for policy in policies}, {sign})
                 self.assertTrue(all(type(policy['scale']) is int and type(policy['precision']) is int for policy in policies))
-                self.assertTrue(all(policy['precision'] >= 5 for policy in policies))
+                self.assertEqual({policy['precision'] for policy in policies}, {precision})
                 self.assertEqual(metadata['unknown_option'], 'unknown')
 
     def test_text_padding_alternatives_preserve_no_padding_choice(self):

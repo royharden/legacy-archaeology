@@ -24,7 +24,8 @@ def identity(ref: dict) -> tuple:
 
 
 def _equal(expected: dict, actual: dict) -> bool:
-    if not isinstance(actual, dict) or expected.get('data_type') != actual.get('data_type'):
+    if (not isinstance(actual, dict) or set(actual) != {'data_type', 'value'}
+            or expected.get('data_type') != actual.get('data_type')):
         return False
     left, right = expected.get('value'), actual.get('value')
     if left is None or right is None:
@@ -83,6 +84,10 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
     resolved = resolved_correct = 0
     diffs, missing, duplicates = [], [], []
     quarantine_expected, quarantine_observed, quarantine_correct = Counter(), Counter(), Counter()
+    # Precision includes every emitted prediction, even an unjoinable identity.
+    for row in outcomes:
+        if isinstance(row, dict) and row.get('outcome') == 'quarantined':
+            quarantine_observed.update(_reasons(row))
     expected_status, actual_status = Counter(), Counter()
     expected_sum, actual_sum = Decimal(0), Decimal(0)
     expected_null, actual_null, expected_empty, actual_empty = Counter(), Counter(), Counter(), Counter()
@@ -96,10 +101,6 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
         expected_kind = oracle['expected_outcome']
         if expected_kind == 'quarantined':
             quarantine_expected.update(_reasons(oracle))
-        # All emitted quarantines count, including duplicates; precision cannot cherry-pick.
-        for row in rows:
-            if row.get('outcome') == 'quarantined':
-                quarantine_observed.update(_reasons(row))
         if expected_kind == 'converted':
             valid += 1
             fields = oracle['fields']
@@ -159,14 +160,8 @@ def score(oracle_records: list[dict], outcomes: list[dict], *, edition: str = 'd
             actual_empty[name] += field.get('value') == ''
     extra = [{'record_ref': rows[0]['record_ref'], 'count': len(rows)}
              for key, rows in observed.items() if key not in expected]
-    # Extra quarantines also reduce precision.
-    for key, rows in observed.items():
-        if key not in expected:
-            for row in rows:
-                if row.get('outcome') == 'quarantined':
-                    quarantine_observed.update(_reasons(row))
     reasons = sorted(set(quarantine_expected) | set(quarantine_observed))
-    return {'schema_version': 1, 'scorer_version': 'semantic-v2', 'edition': edition,
+    return {'schema_version': 1, 'scorer_version': 'semantic-v3', 'edition': edition,
             'semantic_rows': _rate(correct_rows, valid), 'semantic_fields': _rate(correct_fields, valid * 5),
             'all_record_outcomes': _rate(correct_outcomes, len(expected)),
             'resolved_field_coverage': _rate(resolved, valid * 5),

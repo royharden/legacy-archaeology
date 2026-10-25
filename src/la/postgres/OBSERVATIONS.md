@@ -4,6 +4,16 @@ No API below has been invoked in Dirty Mode. No database/crypto/driver behavior 
 
 Public source APIs from `la.postgres`:
 
+R03 forwarded disposable targets: `TargetConfig.host/port` always pins the exact
+loopback DSN endpoint. Optional paired `server_host/server_port` separately pins
+the canonical private/loopback IP and port reported by PostgreSQL, for example
+through Docker port forwarding. Missing either pin refuses. With both pins,
+observations retain the actual server `host/port` and add the loopback
+`connection_host/connection_port`; neither identity is substituted for the other.
+Without server pins, legacy exact endpoint checks, observation keys and public
+configuration hashes remain unchanged. Changing any pin requires new signed
+authority/config evidence. Independent real-target checks remain required.
+
 - `prepare_evaluation_candidate(batch,proposal,*,edition,freeze_sha256)` returns `{kind:'disposable_evaluation_candidate',descriptor,batch,proposal}`. It structurally validates a complete strict proposal and uses the same deterministic converter/SQL compiler for B0/B1/C0/R0/R1. Descriptor includes source/framing/mapping(proposal)/config/sample/code/SQL/outcome pins, method, frozen edition, complete counts, candidate_sha256, product_loadable:false, product_approval:absent. No product AnswerEvent/MappingSpec/approval is fabricated. Incomplete proposals fail explicitly. No gold is an input.
 - Product artifact for this v2 port is exactly `{kind:'product_bundle',bundle_path}` and must pass offline source/lineage/code verification against externally configured bundle pins.
 - `TargetAuthorityVerifier(trusted_issuers,public_keys)` is concrete lazy Ed25519 verification, compatible with the evaluator signed-receipt envelope. Operator-configured public key bytes only; callbacks/always-true verifiers and signing keys are not accepted. Missing cryptography fails closed without installation.

@@ -160,6 +160,8 @@ def _observed_target(connection, config):
             database, role, host, port, version = cursor.fetchone()
         raw = {'database': database, 'role': role, 'host': host, 'port': port, 'server_version_num': version,
                'authority_reference': config.authority_reference, 'scope': config.scope, 'driver_version': config.driver_version}
+        if config.server_host is not None:
+            raw.update(connection_host=config.host, connection_port=config.port)
         try:
             _target(raw)
         except ValueError:

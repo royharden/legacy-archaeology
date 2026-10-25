@@ -99,8 +99,16 @@ def observe_source(path):
         after=os.fstat(handle.fileno())
     try: current=path.stat()
     except OSError: current=None
+    # On Windows Python 3.12, fstat() can expose modification time as ctime
+    # while Path.stat() exposes creation time. They differ for a stable file
+    # just written by the caller. Compare the same file identity, size and
+    # modification timestamp through both APIs; retain change-time checking
+    # on platforms where it has the same meaning through both APIs.
+    identity_fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns')
+    if os.name != 'nt':
+        identity_fields += ('st_ctime_ns',)
     def stamp(info):
-        return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns) if info else None
+        return tuple(getattr(info, key) for key in identity_fields) if info else None
     stable=stamp(before)==stamp(after)==stamp(current) and size==after.st_size
     observation=dict(schema_version=1,kind='complete_source_stream_observation',
         source_sha256=hasher.hexdigest(),input_byte_count=size,
@@ -109,7 +117,8 @@ def observe_source(path):
         complete_stream=True,retained=size<=SOURCE_BYTES and stable,
         memory_limit_bytes=SOURCE_BYTES,chunk_bytes=64*1024,
         before_identity_sha256=digest(stamp(before)),after_identity_sha256=digest(stamp(current)),
-        reader_policy_sha256=digest({'version':1,'chunk_bytes':64*1024,'memory_limit_bytes':SOURCE_BYTES,'complete_stream_hash':True}))
+        reader_policy_sha256=digest({'version':2,'chunk_bytes':64*1024,'memory_limit_bytes':SOURCE_BYTES,
+            'complete_stream_hash':True,'identity_fields':list(identity_fields)}))
     observation['observation_sha256']=digest(observation)
     return (bytes(buffered) if observation['retained'] else None),observation
 

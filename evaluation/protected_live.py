@@ -433,6 +433,14 @@ class ProtectedProviderPort:
     cases: dict
     count_tokens: Callable[[str], int]
 
+    def preflight(self, request: dict) -> str:
+        """Validate actual wrapped bytes without appending a liability event."""
+        preflight = getattr(self.inner, 'preflight', None)
+        text = preflight(deepcopy(request)) if preflight else canonical(request['prompt']).decode('utf-8')
+        if not isinstance(text, str) or len(text.encode('utf-8')) > 32768:
+            raise ValueError('invalid or oversized provider transport text')
+        return text
+
     def __call__(self, request: dict) -> dict:
         scope = self.context.validate()
         caps = scope['caps']
@@ -448,7 +456,7 @@ class ProtectedProviderPort:
             raise ValueError('T3 request does not name one declared heldout case')
         if request.get('prompt_sha256') != digest(prompt):
             raise ValueError('T3 request prompt hash mismatch')
-        tokens = self.count_tokens(canonical(prompt).decode('utf-8'))
+        tokens = self.count_tokens(self.preflight(request))
         if type(tokens) is not int or not 0 <= tokens <= caps['max_input_tokens']:
             raise ValueError('T3 input token preflight exceeds signed cap')
         method = request['method']
