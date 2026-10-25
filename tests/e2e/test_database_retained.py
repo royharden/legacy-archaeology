@@ -4,6 +4,7 @@ Run with M1_RV2_DB_CHECK=1 and M1_RV2_EVIDENCE naming an existing owned root.
 No credentials, DROP, DELETE, resource removal or automatic cleanup is used.
 """
 from dataclasses import replace
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -164,9 +165,9 @@ class RetainedDatabaseJourney(unittest.TestCase):
 
     def test_all_five_target_arms_grade_real_controlled_effects(self):
         """what_bug_this_catches: fake negative flags or ACK claims clear W7 grading."""
-        from la.postgres import (prepare_evaluation_candidate_v2, target_observer_v2,
-                                 collect_controlled_failed_load, collect_controlled_lost_ack,
-                                 observer_code_pin)
+        from la.postgres import (prepare_evaluation_candidate_v2,
+                                 observer_code_pin, collect_target_experiment, target_experiment_callbacks,
+                                 reconcile_target_experiment, target_reconciliation_callbacks)
         from postgres.test_target_candidates import ephemeral_signer
         from postgres.test_controlled_target import phase_intent
         from review.support import proposal
@@ -196,12 +197,20 @@ class RetainedDatabaseJourney(unittest.TestCase):
                 config = replace(self.config_base, authority_reference=body['authority_sha256'],
                                  expected_candidate_sha256=artifact['descriptor']['candidate_sha256'])
                 kwargs = dict(dsn=self.dsn, target_config=config, authority_verifier=verifier)
-                positive = target_observer_v2(artifact, authority, negative_kinds=tuple(STATES), **kwargs)
-                self.capture(method + '-positive', positive)
-                failed = collect_controlled_failed_load(artifact, authority, **kwargs)
-                self.capture(method + '-failed-load', failed)
-                pair = collect_controlled_lost_ack(artifact, authority, **kwargs)
-                self.capture(method + '-controlled-ack', pair)
+                capture_root = self.root / ('facade-' + method); capture_root.mkdir()
+                manifest = collect_target_experiment(artifact, authority, capture_root=capture_root,
+                                                     experiment_id='actual', **kwargs)
+                experiment = capture_root / 'actual'
+                original_manifest = (experiment / 'experiment.json').read_bytes()
+                callbacks = target_experiment_callbacks(experiment,
+                    expected_experiment_sha256=manifest['experiment_sha256'],
+                    expected_candidate_sha256=artifact['descriptor']['candidate_sha256'],
+                    expected_authority_sha256=body['authority_sha256'])
+                with patch('la.postgres.runner.driver_and_connect', side_effect=AssertionError('offline callbacks must not connect')):
+                    positive = callbacks.observe(artifact, authority)
+                    failed = callbacks.failed_load(artifact, authority)
+                    pair = callbacks.recovery(artifact, authority)
+                self.capture(method + '-manifest', manifest)
                 target = dict(database='m1_rv2', role='m1_rv2', host='172.17.0.8', port=21800,
                               connection_host='127.0.0.1', connection_port=21800, server_version_num=170006,
                               authority_reference=body['authority_sha256'], scope='disposable_local_test',
@@ -213,6 +222,40 @@ class RetainedDatabaseJourney(unittest.TestCase):
                 self.capture(method + '-independent-grade', result)
                 self.assertEqual(result['target_validation'], 'passed', result)
                 self.assertEqual(result['product_acceptance'], 'pending')
+                for kind in STATES:
+                    changed = deepcopy(positive)
+                    changed['negative_effects'] = [effect for effect in changed['negative_effects']
+                                                   if effect['probe_kind'] != kind]
+                    changed['observation_sha256'] = digest({k: v for k, v in changed.items() if k != 'observation_sha256'})
+                    rejected = grade_target(oracle, changed, expectation=expected, prior=pair['prior'],
+                                            failed_load=failed, recovery_observation=pair['reconciled'])
+                    self.assertNotEqual(rejected['target_validation'], 'passed', kind)
+                missing_prior = grade_target(oracle, positive, expectation=expected, prior=None,
+                                             failed_load=failed, recovery_observation=pair['reconciled'])
+                self.assertNotEqual(missing_prior['target_validation'], 'passed')
+                with self.assertRaises(ValueError):
+                    target_experiment_callbacks(experiment, expected_experiment_sha256='0' * 64,
+                        expected_candidate_sha256=artifact['descriptor']['candidate_sha256'],
+                        expected_authority_sha256=body['authority_sha256'])
+                with patch('la.postgres.runner._observe_candidate', side_effect=AssertionError('later recovery must not load')):
+                    record = reconcile_target_experiment(experiment, artifact, authority,
+                        expected_experiment_sha256=manifest['experiment_sha256'], **kwargs)
+                    second = reconcile_target_experiment(experiment, artifact, authority,
+                        expected_experiment_sha256=manifest['experiment_sha256'],
+                        previous_reconciliation_sha256=record['reconciliation_sha256'], **kwargs)
+                selected = target_reconciliation_callbacks(experiment, artifact, authority,
+                    expected_experiment_sha256=manifest['experiment_sha256'],
+                    expected_reconciliation_sha256=second['reconciliation_sha256'],
+                    expected_prior_observation_sha256=pair['prior']['observation_sha256'],
+                    target_config=config, authority_verifier=verifier)
+                later = selected.recovery(artifact, authority)
+                later_grade = grade_target(oracle, selected.observe(artifact, authority), expectation=expected,
+                    prior=later['prior'], failed_load=selected.failed_load(artifact, authority),
+                    recovery_observation=later['reconciled'])
+                self.capture(method + '-later-recovery-grade', later_grade)
+                self.capture(method + '-later-recovery-selection', selected.projection())
+                self.assertEqual(later_grade['target_validation'], 'passed', later_grade)
+                self.assertEqual((experiment / 'experiment.json').read_bytes(), original_manifest)
 
 
 if __name__ == '__main__':
