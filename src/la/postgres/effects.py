@@ -40,7 +40,16 @@ def _issues(value):
 
 def _target(value):
     keys = {'database', 'role', 'host', 'port', 'server_version_num', 'authority_reference', 'scope', 'driver_version'}
-    if not isinstance(value, dict) or set(value) != keys or value['host'] not in ('127.0.0.1', '::1') or type(value['port']) is not int or not 1 <= value['port'] <= 65535 or value['port'] in (20178, 20179, 55490) or type(value['server_version_num']) is not int or value['scope'] != 'disposable_local_test':
+    forwarded = isinstance(value, dict) and set(value) == keys | {'connection_host', 'connection_port'}
+    if not isinstance(value, dict) or (set(value) != keys and not forwarded):
+        raise ValueError('closed actual target identity required')
+    if forwarded:
+        from .target import validate_server_endpoint
+        validate_server_endpoint(value['host'], value['port'])
+        connection_host, connection_port = value['connection_host'], value['connection_port']
+    else:
+        connection_host, connection_port = value['host'], value['port']
+    if connection_host not in ('127.0.0.1', '::1') or type(connection_port) is not int or not 1 <= connection_port <= 65535 or connection_port in (20178, 20179, 55490) or type(value['server_version_num']) is not int or value['scope'] != 'disposable_local_test':
         raise ValueError('closed actual target identity required')
     if any(not isinstance(value[key], str) or not value[key] or len(value[key]) > 200 for key in ('database', 'role', 'authority_reference', 'driver_version')):
         raise ValueError('invalid target identity/version fields')

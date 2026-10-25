@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from ipaddress import ip_address
 import re
 import uuid
 import os
@@ -59,6 +60,8 @@ class TargetConfig:
     expected_source_sha256: str | None = None
     expected_mapping_sha256: str | None = None
     expected_candidate_sha256: str | None = None
+    server_host: str | None = None
+    server_port: int | None = None
 
     def validate(self):
         if self.scope != 'disposable_local_test' or not self.authority_reference.strip():
@@ -67,6 +70,10 @@ class TargetConfig:
             raise ValueError('only explicit loopback target allowed')
         if self.port in (20178, 20179, 55490):
             raise ValueError('reserved unrelated project target is forbidden')
+        if (self.server_host is None) != (self.server_port is None):
+            raise ValueError('server endpoint pins must be supplied together')
+        if self.server_host is not None:
+            validate_server_endpoint(self.server_host, self.server_port)
         if any(not isinstance(v, str) or not v or len(v) > 63 or '\x00' in v for v in (self.database, self.role)):
             raise ValueError('explicit database and least-privilege role required')
         if not self.driver_version or type(self.server_major) is not int or self.server_major < 12:
@@ -79,7 +86,24 @@ class TargetConfig:
         return self
 
     def public(self):
-        return {key: getattr(self, key) for key in self.__dataclass_fields__}
+        # Keep existing config identities byte-for-byte when forwarding is unused.
+        return {key: getattr(self, key) for key in self.__dataclass_fields__
+                if key not in ('server_host', 'server_port') or getattr(self, key) is not None}
+
+
+def validate_server_endpoint(host, port):
+    """Explicit observed IP, separate from the mandatory loopback connection."""
+    if not isinstance(host, str) or '%' in host:
+        raise ValueError('literal server IP pin required')
+    try:
+        address = ip_address(host)
+    except ValueError as exc:
+        raise ValueError('literal server IP pin required') from exc
+    if (not (address.is_private or address.is_loopback) or address.is_unspecified
+            or address.is_multicast or address.is_link_local or str(address) != host):
+        raise ValueError('canonical private or loopback server IP required')
+    if type(port) is not int or not 1 <= port <= 65535 or port in (20178, 20179, 55490):
+        raise ValueError('invalid disposable server port')
 
 
 def owned_namespace(namespace):
@@ -113,11 +137,14 @@ def driver_and_connect(dsn, config):
 
 
 def inspect_target(connection, config):
+    config.validate()
     with connection.cursor() as cursor:
         # host() drops the netmask; inet::text would render '127.0.0.1/32' and never match.
         cursor.execute('SELECT current_database(), current_user, host(inet_server_addr()), inet_server_port(), current_setting(\'server_version_num\')::int')
         database, role, host, port, version = cursor.fetchone()
-        if (database, role, host, port, version // 10000) != (config.database, config.role, config.host, config.port, config.server_major):
+        expected_host = config.host if config.server_host is None else config.server_host
+        expected_port = config.port if config.server_port is None else config.server_port
+        if (database, role, host, port, version // 10000) != (config.database, config.role, expected_host, expected_port, config.server_major):
             raise ValueError('actual target identity/version mismatch')
         cursor.execute('SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=current_user')
         flags = cursor.fetchone()
@@ -125,9 +152,12 @@ def inspect_target(connection, config):
             raise ValueError('target role is not least privilege')
         cursor.execute("SELECT set_config('statement_timeout', %s, true)", (str(config.statement_timeout_ms),))
         cursor.execute("SELECT set_config('lock_timeout', '5000', true)")
-    return {'database': database, 'role': role, 'host': host, 'port': port,
+    result = {'database': database, 'role': role, 'host': host, 'port': port,
             'server_version_num': version, 'authority_reference': config.authority_reference,
             'scope': config.scope, 'driver_version': config.driver_version}
+    if config.server_host is not None:
+        result.update(connection_host=config.host, connection_port=config.port)
+    return result
 
 
 def connection_identity(connection):

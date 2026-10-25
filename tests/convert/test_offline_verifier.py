@@ -152,7 +152,12 @@ class OfflineVerifier(unittest.TestCase):
         manifest['files']['../outside.json'] = 'a' * 64
         manifest['bundle_sha256'] = digest({k: v for k, v in manifest.items() if k != 'bundle_sha256'})
         (self.bundle / 'manifest.json').write_text(canonical(manifest))
-        self.assertIn('referenced_member_set_mismatch', self.codes(self.check()))
+        # The closed manifest schema may reject traversal before member-set
+        # comparison. Both paths must still fail integrity and block loading.
+        result=self.check()
+        self.assertEqual(result['integrity_status'],'failed')
+        self.assertFalse(result['loadable'])
+        self.assertTrue(self.codes(result) & {'referenced_member_set_mismatch','invalid_artifact'})
 
     def test_symlink_member_and_root_are_refused(self):
         path = self.bundle / 'LOAD.md'; original = path.read_bytes(); path.unlink()

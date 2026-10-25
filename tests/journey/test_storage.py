@@ -7,6 +7,8 @@ import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
+import os
 
 from la.app import execute,parser
 from la.app.artifacts import immutable,pointer,read
@@ -18,7 +20,25 @@ from la.contracts import digest,sha256
 class StorageTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name)
+        self.root=Path(self.temp.name).resolve()
+
+    def test_source_identity_distinguishes_windows_ctime_from_mutation(self):
+        """what_bug_this_catches: Windows creation/change time mismatch refuses stable source."""
+        path=self.root/'stable-public.dat'; path.write_bytes(b'ABCD\nEFGH\n')
+        actual=path.stat()
+        fields=('st_mode','st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
+        before=SimpleNamespace(**{key:getattr(actual,key) for key in fields})
+        before.st_ctime_ns += 100
+        after=SimpleNamespace(**vars(before)); after.st_ctime_ns += 100
+        with patch('la.app.storage.os.fstat',side_effect=[before,after]):
+            retained,observation=observe_source(path)
+        self.assertEqual(observation['stable'],os.name=='nt')
+        self.assertEqual(retained,b'ABCD\nEFGH\n' if os.name=='nt' else None)
+        after.st_size += 1
+        with patch('la.app.storage.os.fstat',side_effect=[before,after]):
+            retained,observation=observe_source(path)
+        self.assertFalse(observation['stable'])
+        self.assertIsNone(retained)
 
     def test_immutable_exact_retry_and_failed_stage_never_publish_partial_final(self):
         """what_bug_this_catches: crash exposes partial frozen bytes or retry overwrites them."""

@@ -18,7 +18,7 @@ ROWS = [b'000001Alpha       +0000123420240229A', b'000002Beta        -0000050020
 class CliJourneyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name)
+        self.base = Path(self.tmp.name).resolve()
         self.inputs = self.base/'inputs'; self.inputs.mkdir()
         self.root = self.base/'runs'
         data = b'\n'.join(ROWS)+b'\n'
@@ -168,8 +168,11 @@ class CliJourneyTests(unittest.TestCase):
     def test_new_target_path_missing_signed_trust_never_reads_environment(self):
         """what_bug_this_catches: a new target command loads/reads DSN before real authority."""
         folder=self.root/'no-authority-candidate'; folder.mkdir()
+        # argparse/gettext may consult locale variables; only the target path
+        # is under this no-environment-read assertion.
+        arguments=parser().parse_args(['--root',str(self.root),'database-observe',str(folder.relative_to(self.root))])
         with patch('la.app.observations.os.environ.get',side_effect=AssertionError('no environment read allowed')):
-            result=self.call('database-observe',str(folder.relative_to(self.root)))
+            result=execute(arguments)
         self.assertEqual(result['payload']['target_validation'],'not_run')
         self.assertIsNone(result['payload']['observation'])
 

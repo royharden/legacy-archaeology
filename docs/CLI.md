@@ -1,8 +1,8 @@
 # Local commands and later activation
 
-All examples are future commands. None has run during Dirty Mode construction.
-After the separately authorized setup phase, use Python3.12 and establish the
-declared dependencies. No tested lockfile is supplied. Invoke commands from the
+Use Python 3.12.13 and the pinned [environment recipe](ENVIRONMENT.md).
+Public keyless checks now execute in Normal mode; each target/evaluator command
+still requires its own explicit inputs and authority. Invoke commands from the
 product root; `--root` precedes the subcommand.
 
 ```console
@@ -161,11 +161,11 @@ la --root .la-runs bundle-inspect RUN/bundles/CONTENT_HASH --expected-bundle-sha
 Bundle inspection produces an immutable verification receipt with integrity,
 external-pin provenance and differences; no pin means non-loadable inspection.
 [Storage/restart behavior](STORAGE.md) documents caps, process locks, CAS,
-streamed refusals, immutable retries and orphan stages. No command above ran here.
+streamed refusals, immutable retries and orphan stages. These commands do not grant target execution authority.
 
 Ready caller factories and local result tables are in [config/README.md](../config/README.md) and [RESULTS.md](RESULTS.md). Future public rules/mock suite entrypoint: `python scripts/eval.py --evidence-root ROOT --out captures suite --public-development --mode mock --split development --config config/public-mock.example.json`. Resolve the config path under ROOT. `public-catalog --nonce EXACT_64_HEX` emits a public catalog receipt; `edition-register --registry operator/editions.sqlite --packet RELATIVE_CATALOG_RECEIPT --request-id UNIQUE_ID --expected-head CURRENT_HEAD` registers that exact catalog. The default eligibility factory verifies existing signed T1/T3 evidence using explicit --public-trust-root/profile before case access. The default product factory receives only visible capability/config, never oracle/custody/store objects. See config templates for required signed billing pins and caps. Templates containing placeholders are deliberately non-executable.
 
-The public prepare-target packet additionally accepts evaluation_phase and evaluation_plan_sha256. A T1 development/validation packet requires freeze_sha256=null and its exact named signed development-plan pin; it is never substituted into a final freeze. Suite target adapters use actual TargetPorts.prepare_v2. Controlled collectors require separately signed operations and explicit selection; stored observations remain an alternative. Missing effects stay indeterminate. No command ran here.
+The public prepare-target packet additionally accepts evaluation_phase and evaluation_plan_sha256. A T1 development/validation packet requires freeze_sha256=null and its exact named signed development-plan pin; it is never substituted into a final freeze. Suite target adapters use actual TargetPorts.prepare_v2. Controlled collectors require separately signed operations and explicit selection; stored observations remain an alternative. Missing effects stay indeterminate. Execution requires a separately pinned receipt.
 
 [Shared wire contracts](CONTRACTS.md) document the canonical base, actual closed nested owner aliases and supplied-only serialization. Unknown protocol fields reject before prompting/approval; raw vendor usage stays bounded opaque data and unsupported billing remains unknown. Old artifacts are immutable; new public hand mappings use the documented explicit discovery form before hashing.
 

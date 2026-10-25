@@ -28,6 +28,16 @@ def status_vocabulary(brief: str) -> dict:
             values = [item.strip() for item in match.group(1).split(',')]
             if len(values) <= 64: codes, source = sorted(set(values)), 'explicit_status_code_list'
     if codes is None:
+        # Explicit vocabulary labels may use prose ("A active, C closed").
+        # Require a code and a nonempty label in every comma-separated item;
+        # arbitrary observed status bytes never create a vocabulary.
+        match = re.search(r'\bstatus(?:_codes|\s+vocabulary|\s+codes)\s*[:=]\s*([^\n.;]{1,2000})', brief, re.I)
+        if match:
+            parts = match.group(1).split(',')
+            labels = [re.fullmatch(r'\s*([A-Za-z0-9_-]{1,32})\s+(?:=\s*)?([^,=]+?)\s*', part) for part in parts]
+            if 0 < len(labels) <= 64 and all(labels):
+                codes, source = sorted({label.group(1) for label in labels}), 'explicit_status_labels'
+    if codes is None:
         match = re.search(r'\bstatus\s*\(([^)\n]{1,2000})\)', brief, re.I)
         if match:
             parts = re.split(r'[,;]', match.group(1))
@@ -57,13 +67,16 @@ def compatible_targets(raws: list[bytes], brief: str) -> list[str]:
 def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tuple[list[dict], dict]:
     """At most three complete policies per physical-field/semantic-name option.
 
-    Axes are recorded separately; three deterministic diagonals deliberately do
+    Axes are recorded separately; bounded prioritized proposals deliberately do
     not pretend to exhaust their Cartesian product. Unknown is always required.
     """
-    observed_left = any(raw.startswith(b' ') for raw in raws)
-    observed_right = any(raw.endswith(b' ') for raw in raws)
+    # A blank lexeme has no token edge from which to infer a padding side.
+    # It still participates in the separate sentinel/null alternatives below.
+    text_target = target in ('account_ref', 'description', 'status')
+    padding_observations = [raw for raw in raws if raw.strip(b' ')]
+    observed_left = any(raw.startswith(b' ') for raw in padding_observations)
+    observed_right = any(raw.endswith(b' ') for raw in padding_observations)
     sides = ['left', 'none', 'right'] if observed_left and not observed_right else ['right', 'none', 'left'] if observed_right and not observed_left else ['left', 'right', 'none'] if observed_left else ['none', 'left', 'right']
-    padding = [{'padding_byte': ' ', 'padding_side': side, 'trim': side != 'none'} for side in sides]
     # Prefer an observed sign but expose all supported modes as explicit options.
     stripped = [raw.strip(b' ') for raw in raws]
     leading = any(value.startswith((b'+', b'-')) for value in stripped)
@@ -75,6 +88,12 @@ def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tup
     formats = ['YYMMDD'] if lengths == [6] else ['YYYYMMDD'] if lengths == [8] else ['YYYYMMDD', 'YYMMDD']
     sentinel_values = sorted({raw.decode('ascii') for raw in raws
                               if raw == b' ' * len(raw) or raw == b'9' * len(raw)})
+    # Declaring a side need not remove bytes. For unpadded text, spend the
+    # three proposals on side declarations that preserve the observed bytes.
+    # Sentinel-bearing text instead reserves proposals for literal/empty/NULL.
+    propose_trim = observed_left or observed_right or not text_target or bool(sentinel_values)
+    padding = [{'padding_byte': ' ', 'padding_side': side, 'trim': side != 'none' and propose_trim}
+               for side in sides]
     sentinel_modes = ['preserve_or_reject', 'explicit_sql_null'] if sentinel_values else ['preserve_or_reject']
     axes = {'padding': padding}
     if target == 'balance':
@@ -84,14 +103,21 @@ def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tup
     if target == 'effective_date':
         axes.update(format=formats, sentinel=sentinel_modes)
         if 'YYMMDD' in formats: axes['century_window'] = CENTURY_WINDOWS
-    if target in ('account_ref', 'description', 'status') and sentinel_values:
-        if sentinel_values: axes['sentinel'] = ['preserve_or_reject', 'explicit_sql_null']
+    if text_target and sentinel_values:
+        axes['sentinel'] = ['preserve_or_reject', 'explicit_sql_null']
     alternatives = []
+    # Physical capacity is a finite precision proposal, not a business limit.
+    # The sign consumes a byte but not a decimal digit. Do not advertise an
+    # observed-width axis then silently use only the unrelated maximum38.
+    digit_capacity = max((len(value) - int(value.startswith((b'+', b'-')) or value.endswith((b'+', b'-')))
+                          for value in stripped if re.fullmatch(rb'(?:[+-]?\d+|\d+[+-])', value)), default=1)
+    if target == 'balance':
+        axes['precision'] = sorted({max(3, digit_capacity), 18, 38})
     for index in range(3):
         pad_index = 0 if target in ('balance', 'effective_date') else index % len(padding)
         policy = dict(padding[pad_index], nullable=False)
         if target == 'balance':
-            policy.update(sign=signs[0], scale=axes['scale'][index], precision=max(axes['precision']))
+            policy.update(sign=signs[0], scale=axes['scale'][index], precision=max(3, digit_capacity))
         if target == 'effective_date':
             policy.update(format=formats[index % len(formats)], sentinels={})
             if policy['format'] == 'YYMMDD': policy['century_window'] = CENTURY_WINDOWS[index]
@@ -100,6 +126,22 @@ def policy_alternatives(raws: list[bytes], target: str, vocabulary: dict) -> tup
         if target == 'status' and vocabulary['codes'] is not None:
             policy['allowed_codes'] = vocabulary['codes']
         if policy not in alternatives: alternatives.append(policy)
+    if text_target and sentinel_values:
+        # Preserve blank/empty/null distinctions instead of spending the sole
+        # no-trim option on NULL and silently removing literal preservation.
+        # An unobserved opposite-side trim stays an explicitly omitted choice.
+        preserve = {'padding_byte': ' ', 'padding_side': 'none', 'trim': False, 'nullable': False}
+        # Blank-only rows reveal no edge. Still offer an explicit trim policy
+        # distinct from literal preservation; its right side is a proposal.
+        trim_padding = padding[0] if padding[0]['trim'] else next(
+            option for option in padding if option['padding_side'] == 'right')
+        trim = dict(trim_padding, nullable=False)
+        null = dict(trim_padding, nullable=True, sentinels={value: 'null' for value in sentinel_values})
+        alternatives = []
+        for policy in (preserve, trim, null):
+            if target == 'status' and vocabulary['codes'] is not None:
+                policy['allowed_codes'] = vocabulary['codes']
+            if policy not in alternatives: alternatives.append(policy)
     combinations = 1
     for values in axes.values(): combinations *= len(values)
     diagnostics = {'axes': axes, 'policy_option_count': len(alternatives),

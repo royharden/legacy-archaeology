@@ -1,60 +1,24 @@
-# Regression source and deferred execution
+# Public local verification
 
-Tests were authored in Dirty Mode and have **not** been imported, collected or
-executed. AST syntax parsing is the performed check. The cases and assertions are
-not evidence of runtime success, coverage, independence or product acceptance.
+Use the pinned project Python environment. From any directory:
 
-D7's suites use stdlib unittest; no new test dependency, lockfile, CI or environment
-was needed. After Dirty Mode closure and separately authorized Python3.12/dependency
-setup, run from the product root:
-
-```console
-uv run python -m unittest discover -s tests/contracts -p "test_*.py"
-uv run python -m unittest discover -s tests/providers -p "test_*.py"
-uv run python -m unittest discover -s tests/journey -p "test_*.py"
+```powershell
+& '<checkout>/.venv/runtime/Scripts/python.exe' '<checkout>/scripts/test_local.py' --out '<evidence-directory>'
 ```
 
-The managed environment must already be established in that later phase. These
-commands have not run here. Other owners' regression suites have their own source
-instructions and are not claimed by this document.
+Select a focused suite with repeated `--suite providers` or `--suite journey` options.
+Each suite runs in a fresh interpreter with this checkout's source and test helpers.
+Subprocesses inherit the caller's working directory; discovery and import roots use
+absolute checkout paths. Both the receipt and each suite result record that actual
+working directory as `cwd`. Under the current run orders, invoke from the OUTER shell.
+The runner continues after a failure, preserves complete logs and their SHA256 hashes,
+records commands and return codes in a unique `results.json`, and exits nonzero if
+any suite fails or times out. A timeout terminates the suite subprocess and remains
+an explicit failure. No test count is a substitute for inspecting failed assertions.
 
-Contracts cases cover strict extras/types/hash shapes, changed candidate/generation
-identity, raw-record hashes, optional intake/discovery/filler serialization and
-inference wheel/evaluator import separation. Provider cases use only injected
-synthetic transports and local temporary SQLite; never real keys/network/accounts.
-They cover exact cached/reasoning accounting, missing authority, unexpected model
-or usage, crash reservations, single-flight across runs, counted failures,
-one-attempt malformed B1, unknown-liability/CAS reconciliation and immutable export.
-Prompt cases hand-author an AB-only sample span and assert CD/EFGH never leak,
-stale content refuses and invented IDs/SQL/offset output is rejected.
-
-The journey uses two hand-authored36-byte account records and explicit test-only
-policies. Expected12.34/-5.00 amounts, calendar dates and leading-zero identifiers
-are written by hand. It records actual future journal API events rather than
-fabricating receipts. It checks exact retry/CAS, replay, approved export lineage,
-source/path rejection, unresolved no-load rows, stale approval invalidation and
-malicious actor HTML escaping. It does not assert candidate inference recall,
-call evaluator gold code, connect to a database or claim independent parity from
-row counts. Actual evaluator/target/product verification remains separate.
-
-Every case identifies `what_bug_this_catches`. Concrete source issues found while
-authoring strengthened shared hash/raw-record/generation/candidate validation and
-kept wrong-model billing liability unknown. Assertions remain unexecuted until the
-later activation phase; any failure there must remain visible and be repaired.
-
-Additional unexecuted durability source covers exclusive/failed publication,
-content-bound pointer CAS and epoch ABA, per-run lock exclusion, bounded/duplicate/
-deep JSON, orphan staging and immutable directories, full-stream oversize refusal,
-permitted-only reports, and missing/corrupt cache recovery from actual SQLite state.
-The same journey discovery command includes these cases. No subprocess, source
-stream, lock contender, crypto operation or regression case has been run here.
-
-Evidence-consumer source also checks unknown/unapproved explanations, missing or
-rejected target trust before environment access, public-only key profile rejection,
-and omission of unrestricted legacy execution text from permitted-only reports.
-The signature fault test always rejects; it does not replace real verification
-with a passing callback or execute any crypto operation here.
-
-V7F adds future journey regression SOURCE for all-arm/split not_run templates, omitted failed arms, raw/private projection-field refusal, cached/reasoning and absent-usage categories, unknown liability vs known zero, hidden/public and replay route refusal, immutable report retry/tampering, untrusted T1 extras/changed price refusal before transport, and oracle/custody context refusal. These tests have not been imported, collected or executed. Only AST parsing and focused source review are permitted during Dirty Mode.
-
-V7G adds future strict-wire source cases across actual ingest/inference producers, unknown nested sample/intake keys, unknown observed denominators, preserved absent diagnostics, unknown question-option smuggling, bool-as-span, unknown outcome evidence, closed provider pins, unchanged cached/reasoning/future usage categories, and child-schema import topology. Actual schema definitions and test modules have not been imported or executed.
+This runner uses public fixtures and fake transports. It clears ambient disposable
+target authorization. Evaluator suites belong to the evaluator owner; database
+end-to-end tests require a separately assigned loopback target and resource receipt.
+The runner never claims target validation, hidden-corpus custody, benchmark success,
+or independent acceptance of its own tests. RV2 cross-reviews RV1 test changes;
+INT records combined-tree acceptance after review.

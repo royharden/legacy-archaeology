@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "edition": "public-development-v3",
+  "status": "public_development_descriptor",
+  "visibility": "public_development_only",
+  "builder": "evaluation.corpus.build_development_variant",
+  "local_split": "development",
+  "batches_per_variant": 10,
+  "records_per_batch": 100,
+  "malformed_per_batch": 3,
+  "malformed_fraction": "0.03",
+  "malformed_kinds": [
+    "wrong_length",
+    "invalid_date",
+    "invalid_sign",
+    "precision_overflow",
+    "invalid_padding",
+    "high_byte"
+  ],
+  "variants": [
+    {
+      "id": "dev-01",
+      "sign": "leading",
+      "scale": 2,
+      "date": "YYYYMMDD",
+      "text_padding": "right",
+      "framing": "LF",
+      "terminal_newline": true,
+      "sentinel": "99999999"
+    },
+    {
+      "id": "dev-02",
+      "sign": "trailing",
+      "scale": 3,
+      "date": "YYMMDD",
+      "text_padding": "left",
+      "framing": "CRLF",
+      "terminal_newline": false,
+      "sentinel": "999999"
+    },
+    {
+      "id": "dev-03",
+      "sign": "unsigned",
+      "scale": 0,
+      "date": "YYYYMMDD",
+      "text_padding": "right",
+      "framing": "LF",
+      "terminal_newline": false,
+      "sentinel": "        "
+    },
+    {
+      "id": "dev-04",
+      "sign": "trailing",
+      "scale": 2,
+      "date": "YYYYMMDD",
+      "text_padding": "left",
+      "framing": "CRLF",
+      "terminal_newline": true,
+      "sentinel": "99999999"
+    },
+    {
+      "id": "dev-05",
+      "sign": "leading",
+      "scale": 0,
+      "date": "YYMMDD",
+      "text_padding": "right",
+      "framing": "LF",
+      "terminal_newline": true,
+      "sentinel": "      "
+    },
+    {
+      "id": "dev-06",
+      "sign": "unsigned",
+      "scale": 3,
+      "date": "YYMMDD",
+      "text_padding": "left",
+      "framing": "CRLF",
+      "terminal_newline": false,
+      "sentinel": "      "
+    }
+  ],
+  "other_split_contracts": {
+    "validation": {
+      "variants": 4,
+      "materialization": "external_evaluator_only"
+    },
+    "heldout": {
+      "variants": 8,
+      "unseen_combinations_min": 2,
+      "materialization": "external_evaluator_only",
+      "requires": "T0 commitment, T2 freeze, exact-edition authority, external custody"
+    }
+  },
+  "notes": [
+    "Descriptor hand-authored; no batches or hidden assets generated in Dirty Mode",
+    "Each malformed kind occurs five times per 1000-record variant",
+    "Public material cannot become fresh holdout",
+    "Separate six unsupported fixtures remain outside supported denominators",
+    "v3 removes forbidden century_window metadata only for YYYYMMDD; canonical values, serialized bytes, malformed strata and denominators unchanged; v2 captures/results retained"
+  ],
+  "supersedes_metadata_only": "public-development-v2"
+}
