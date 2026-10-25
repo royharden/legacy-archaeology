@@ -6,7 +6,7 @@ from .alternatives import compatible_targets, disclosed_names, policy_alternativ
 from .discovery import discover_fields
 from .filler import declare_filler
 
-POLICY = {'version': 5, 'max_fields': 32, 'max_alternatives': 3, 'scales': [0, 2, 3],
+POLICY = {'version': 6, 'max_fields': 32, 'max_alternatives': 3, 'scales': [0, 2, 3],
           'alternative_unit': 'physical_span_and_semantic_name',
           'combination_policy': 'three_complete_proposals_not_cartesian',
           'unknown_required': True}
