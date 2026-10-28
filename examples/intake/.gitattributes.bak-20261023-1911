@@ -1,0 +1,5 @@
+# These authored teaching inputs have exact byte/file pins, including line endings.
+**/source.dat -text
+**/brief.md -text
+**/samples.json -text
+**/pins.json -text

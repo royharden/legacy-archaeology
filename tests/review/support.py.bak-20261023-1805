@@ -1,0 +1,60 @@
+"""Small declared public fixture; no inference or oracle generator required."""
+from copy import deepcopy
+from pathlib import Path
+
+from la.contracts import digest, sha256
+from la.ingest import ingest_bytes
+from la.ingest.evidence import make_evidence
+from la.review import RulingStore, build_mapping, questions
+
+BRIEF = 'account_ref description balance effective_date status; status codes A,B'
+RAW = [b'0007AB  -0000020240229A', b'0007    +0012320240301B', b'0007AB  -0000020240229A']
+
+
+def fixture(*, filler=False, raw_rows=None):
+    rows = [raw + (b'  ' if filler else b'') for raw in (RAW if raw_rows is None else raw_rows)]
+    data = b'\r\n'.join(rows)  # No terminal newline; duplicate records retain different ordinals.
+    samples = {'schema_version': 1, 'source_sha256': sha256(data), 'authorization': 'public handcrafted regression',
+               'records': [{'ordinal': i, 'raw_hex': raw.hex(), 'raw_sha256': sha256(raw)} for i, raw in enumerate(rows)]}
+    batch = ingest_bytes(data, BRIEF, samples)
+    base = {'padding_byte': ' ', 'padding_side': 'none', 'trim': False, 'nullable': False}
+    fields = [('account_ref', 0, 4, 'text', base),
+              ('description', 4, 8, 'text', dict(base, padding_side='right', trim=True)),
+              ('balance', 8, 14, 'decimal', dict(base, scale=2, precision=6, sign='leading')),
+              ('effective_date', 14, 22, 'date', dict(base, format='YYYYMMDD')),
+              ('status', 22, 23, 'text', dict(base, allowed_codes=['A', 'B']))]
+    candidates = []
+    for target, start, end, kind, policy in fields:
+        value = {'start': start, 'end': end, 'semantic_target': target, 'data_type': kind,
+                 'policy': deepcopy(policy), 'evidence': [make_evidence(batch, 0, start, end)],
+                 'origin': 'mock', 'uncertainty': 'hand_declared_unconfirmed'}
+        candidates.append(dict(value, id=digest(value)))
+    generation = {'schema_version': 1, 'source_sha256': batch['source_sha256'],
+                  'framing_sha256': batch['framing_sha256'], 'brief_sha256': batch['brief_sha256'],
+                  'policy_sha256': digest({'policy': 'hand-declared-regression-v1'}),
+                  'candidates': candidates, 'unknowns': [], 'mode': 'mock', 'filler': []}
+    generation['generation_sha256'] = digest(generation)
+    return batch, generation
+
+
+def answered(root, batch=None, generation=None):
+    if batch is None:
+        batch, generation = fixture()
+    store = RulingStore(Path(root) / 'rulings.sqlite')
+    store.bind_generation(generation)
+    for question in questions(generation):
+        candidate = next(c for c in generation['candidates'] if c['semantic_target'] == question['semantic_target'])
+        store.answer(generation, question['id'], candidate['id'], 'regression_author',
+                     'explicit handcrafted policy', 0, 'initial-' + question['semantic_target'])
+    return batch, generation, store, build_mapping(batch, generation, store)
+
+
+def proposal(batch, generation, method='B0'):
+    result = {'schema_version': 1, 'kind': 'evaluator_proposal', 'method': method,
+              'origin': 'model' if method == 'B1' else 'rules',
+              'source_sha256': batch['source_sha256'], 'framing_sha256': batch['framing_sha256'],
+              'width': batch['width'], 'filler': [],
+              'fields': [{k: deepcopy(c[k]) for k in ('start', 'end', 'semantic_target', 'data_type', 'policy')}
+                         for c in generation['candidates']]}
+    result['proposal_sha256'] = digest(result)
+    return result

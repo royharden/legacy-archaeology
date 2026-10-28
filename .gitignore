@@ -6,3 +6,12 @@ __pycache__/
 *.bak-*
 .env
 .env.*
+
+.creds/
+ArchiveManager-creds.txt
+*.key
+*.pem
+node_modules/
+build/
+dist/
+*.zip

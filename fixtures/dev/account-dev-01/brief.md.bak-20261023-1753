@@ -1,0 +1,1 @@
+This synthetic account ledger contains account_ref (text preserving leading zeros), description (text), balance (exact decimal), effective_date (calendar date or declared null), and status (A = active, C = closed). Field layout and numeric interpretation are unknown. Preserve duplicate business records. This public development fixture is not held out.

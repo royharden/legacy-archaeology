@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "status": "not_run",
+  "purpose": "Finite later mutation audit specifications; no universal safety claim",
+  "mutations": [
+    {"id":"wrong_amount","change":"one converted balance +0.01 at identical scale","expected":"semantic balance mismatch"},
+    {"id":"wrong_target_name","change":"rename account_ref to an unknown semantic ID","expected":"missing target and extra target"},
+    {"id":"scale_error","change":"12.34 becomes 1234.00","expected":"semantic balance mismatch"},
+    {"id":"declared_scale_error","change":"12.34 becomes 12.340","expected":"declared-scale mismatch"},
+    {"id":"sign_error","change":"negative balance becomes positive","expected":"semantic balance mismatch"},
+    {"id":"null_error","change":"date null becomes empty string","expected":"typed null mismatch"},
+    {"id":"date_error","change":"one valid date shifted a day","expected":"semantic date mismatch"},
+    {"id":"drop","change":"remove one valid RecordRef","expected":"missing identity; full denominator retained"},
+    {"id":"duplicate","change":"repeat one exact RecordRef","expected":"duplicate poisons all five cells"},
+    {"id":"compensating_errors","change":"add and subtract equal amounts across two rows","expected":"both row mismatches even if sum passes"},
+    {"id":"drop_duplicate","change":"drop one row and duplicate an equal-value row","expected":"missing and duplicate identities despite matching aggregates"},
+    {"id":"changed_evidence","change":"change source byte or evidence hash after ruling","expected":"dependency invalidation; reviewer must inspect product rejection"},
+    {"id":"stale_approval","change":"reuse approval for changed mapping hash","expected":"load rejection; reviewer must inspect product rejection"},
+    {"id":"incomplete_load","change":"request load of incomplete mapping","expected":"load rejection; reviewer must inspect product rejection"}
+  ]
+}

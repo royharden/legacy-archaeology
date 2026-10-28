@@ -1,0 +1,99 @@
+"""Opt-in PostgreSQL validation. Importing this module never connects."""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+from la.contracts import MigrationBundle
+from la.convert import approve_mapping, sql_artifacts, transform, validate_mapping
+from la.review import digest
+
+
+def _json(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('duplicate JSON member')
+            result[key] = value
+        return result
+    def nonfinite(value):
+        raise ValueError('nonfinite JSON number')
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=nonfinite)
+
+
+def validate_bundle(bundle_path):
+    root = Path(bundle_path).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError('bundle must be a directory')
+    manifest_path = root / 'manifest.json'
+    if manifest_path.is_symlink() or manifest_path.resolve(strict=True).parent != root:
+        raise ValueError('manifest path escape')
+    manifest = _json(manifest_path.read_text(encoding='utf-8'))
+    manifest = MigrationBundle.model_validate(manifest).model_dump()
+    if digest({k: v for k, v in manifest.items() if k != 'bundle_sha256'}) != manifest['bundle_sha256']:
+        raise ValueError('bundle hash mismatch')
+    expected_files = {'mapping.json', 'source.json', 'schema.sql', 'migrate.sql', 'rows.jsonl', 'unresolved.jsonl', 'quarantine.jsonl', 'approval.json', 'rulings.json', 'LOAD.md'}
+    if set(manifest['files']) != expected_files:
+        raise ValueError('unexpected bundle members')
+    for name, expected_hash in manifest['files'].items():
+        path = root / name
+        if path.is_symlink() or path.resolve(strict=True).parent != root:
+            raise ValueError('bundle path escape')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError(f'artifact hash mismatch: {name}')
+    batch = _json((root / 'source.json').read_text(encoding='utf-8'))
+    mapping = _json((root / 'mapping.json').read_text(encoding='utf-8'))
+    validate_mapping(batch, mapping, require_complete=True)
+    approval = _json((root / 'approval.json').read_text(encoding='utf-8'))
+    if approval is None or approval != approve_mapping(mapping, approval['actor'], approval['reason']):
+        raise ValueError('explicit bound approval required')
+    lineage = _json((root / 'rulings.json').read_text(encoding='utf-8'))
+    if not isinstance(lineage, dict) or set(lineage) != {'schema_version', 'generation', 'events'} or lineage['schema_version'] != 1:
+        raise ValueError('committed ruling lineage required')
+    from la.review import build_mapping, validate_event
+    generation, answers = lineage['generation'], {}
+    for exported in lineage['events']:
+        if exported['generation_binding'] != mapping['generation_binding']:
+            continue
+        event = validate_event({k: v for k, v in exported.items() if k != 'sequence'}, generation)
+        prior = answers.get(event['question_id'])
+        if event['revision'] != (prior['revision'] + 1 if prior else 1) or event['previous_event_id'] != (prior['event_id'] if prior else None) or event['old_option_id'] != (prior['option_id'] if prior else None):
+            raise ValueError('supporting event chain mismatch')
+        answers[event['question_id']] = event
+    if build_mapping(batch, generation, {'generation_binding': mapping['generation_binding'], 'answers': answers}) != mapping:
+        raise ValueError('mapping does not match committed ruling lineage')
+    if manifest['mapping_sha256'] != mapping['mapping_sha256'] or manifest['source_sha256'] != batch['source_sha256'] or manifest['generation_binding'] != mapping['generation_binding'] or manifest['approval_sha256'] != approval['approval_sha256']:
+        raise ValueError('manifest dependency mismatch')
+    outcomes = transform(batch, mapping)
+    expected_rows = [o for o in outcomes if o['outcome'] == 'converted']
+    actual_rows = [_json(line) for line in (root / 'rows.jsonl').read_text(encoding='utf-8').splitlines()]
+    if actual_rows != expected_rows:
+        raise ValueError('row projection mismatch')
+    for kind, filename in [('unresolved', 'unresolved.jsonl'), ('quarantined', 'quarantine.jsonl')]:
+        expected = [o for o in outcomes if o['outcome'] == kind]
+        actual = [_json(line) for line in (root / filename).read_text(encoding='utf-8').splitlines()]
+        if actual != expected:
+            raise ValueError('outcome projection mismatch')
+    counts = {kind: sum(o['outcome'] == kind for o in outcomes) for kind in ('converted', 'unresolved', 'quarantined')}
+    if counts != manifest['counts'] or len(outcomes) != manifest['record_count']:
+        raise ValueError('bundle cardinality mismatch')
+    if manifest['config_sha256'] != batch['config_sha256'] or manifest['supporting_event_ids'] != mapping['supporting_event_ids']:
+        raise ValueError('bundle config/ruling pins mismatch')
+    expected_status = 'complete' if outcomes and counts['converted'] == len(outcomes) else 'partial'
+    if manifest['mapping_status'] != 'complete' or manifest['transformation_status'] != expected_status or manifest['target_validation'] != 'not_run' or manifest['row_parity'] != 'not_run':
+        raise ValueError('bundle makes false execution/transformation claims')
+    ddl, sql, columns = sql_artifacts(mapping)
+    if (root / 'schema.sql').read_text(encoding='utf-8') != ddl or (root / 'migrate.sql').read_text(encoding='utf-8') != sql or columns != manifest['columns']:
+        raise ValueError('SQL does not match deterministic mapping')
+    identities = [(o['record_ref']['source_sha256'], o['record_ref']['ordinal']) for o in outcomes]
+    if len(set(identities)) != len(identities):
+        raise ValueError('duplicate record identity')
+    return manifest, mapping, expected_rows, ddl, sql, columns
+
+
+
+# Public compatibility imports; implementations remain inert until explicitly called.
+from .target import TargetConfig
+from .execution import database_check, reconcile_commit, rollback_check, constraint_checks, write_execution_receipt, target_observer

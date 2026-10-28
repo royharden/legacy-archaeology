@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "edition": "unsealed",
+  "benchmark_status": "not_run",
+  "target_validation": "not_run",
+  "product_acceptance": "pending",
+  "custody_status": "not_established",
+  "mode": "source_construction",
+  "reason": "Dirty Mode defers all generator, scorer, arm, benchmark, provider and target execution",
+  "corpus_commitment": null,
+  "freeze": null,
+  "planned_splits": {"development": 6, "validation": 4, "heldout": 8},
+  "arms": [
+    {"method":"B0","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null},
+    {"method":"B1","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null},
+    {"method":"C0","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null},
+    {"method":"R0","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null},
+    {"method":"R1","status":"not_run","semantic_rows":null,"semantic_fields":null,"cost":null}
+  ],
+  "measurements": null,
+  "source_interfaces": ["five-arm runner", "immutable capture and retired replay", "canonical-first six-development-variant builder", "finite value and control mutations", "D5 concrete target-receipt scoring"],
+  "new_public_corpus": "descriptor only; not generated",
+  "mutation_audit": "not_run",
+  "scorer_version": "semantic-v2",
+  "regression_source": {"path":"tests/evaluation", "execution":"not_run", "collection":"not_run"},
+  "public_fixture_edition": "public-development-v2",
+  "custody_enforcement_source": {"contracts":"T0/T2/T3 closed", "verifier":"Ed25519 source only", "registry":"not_opened", "canary_probes":"not_run", "actual_isolation":"unverified"},
+  "limitations": ["public fixture is development only", "no independent oracle/scorer audit", "no fresh hidden edition", "no target readback"]
+}

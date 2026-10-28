@@ -1,0 +1,316 @@
+"""Independent D5 v2 target/effect grading. No product/driver imports.
+
+Externally pinned observer/candidate/authority identity is required. A hash is an
+identity check, not proof that a collector ran; authentic capture remains the
+operator/custody boundary. Producer success booleans are not part of this wire.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from copy import deepcopy
+import re
+
+from .artifacts import canonical, digest, is_sha
+from .eligibility import closed, hashes, text
+from .scorer import FIELDS, identity, score
+
+OBS_KEYS = {'schema_version', 'kind', 'candidate', 'authority_sha256', 'target_config_sha256',
+            'observer_code_sha256', 'attempt', 'target', 'commit_state', 'readback',
+            'negative_effects', 'recovery', 'issues', 'observation_sha256'}
+EFFECT_KEYS = {'schema_version', 'kind', 'probe_kind', 'candidate_sha256', 'source_sha256',
+               'authority_sha256', 'target_config_sha256', 'observer_code_sha256', 'execution_id',
+               'attempt_id', 'namespace', 'target', 'before', 'transaction', 'after',
+               'transaction_state', 'issues', 'effect_sha256'}
+PRODUCT_KEYS = {'schema_version', 'kind', 'candidate_sha256', 'source_sha256', 'framing_sha256',
+                'mapping_sha256', 'config_sha256', 'producer_code_sha256', 'counts', 'record_count',
+                'method', 'edition', 'freeze_sha256'}
+EVAL_KEYS = PRODUCT_KEYS | {'sample_artifact_sha256', 'schema_sha256', 'load_sha256',
+                          'outcomes_sha256', 'rows_sha256', 'product_loadable', 'product_approval'}
+STATES = {'rollback': {'22012'}, 'nonnull': {'23502'}, 'check': {'23514'},
+          'numeric_overflow': {'22003'}, 'duplicate_identity': {'23505'},
+          'invalid_date': {'22007', '22008'}}
+
+
+def _closed_version(value, keys, version, label):
+    if not isinstance(value, dict) or set(value) != keys or type(value['schema_version']) is not int or value['schema_version'] != version:
+        raise ValueError('closed ' + label + ' required')
+    return deepcopy(value)
+
+
+def _sealed(value, key):
+    if not is_sha(value.get(key)) or value[key] != digest({name: item for name, item in value.items() if name != key}):
+        raise ValueError(key + ' mismatch')
+
+
+def _uuid(value):
+    if not isinstance(value, str) or re.fullmatch('[0-9a-f]{32}', value) is None:
+        raise ValueError('exact execution/attempt identity required')
+
+
+def _namespace(value):
+    if not isinstance(value, str) or re.fullmatch('la_[0-9a-f]{32}', value) is None:
+        raise ValueError('owned disposable namespace required')
+
+
+@dataclass(frozen=True)
+class TargetExpectation:
+    candidate: dict
+    authority_sha256: str
+    target_config_sha256: str
+    observer_code_sha256: str
+    target: dict
+    columns: list[list]
+    required_negatives: tuple[str, ...] = tuple(STATES)
+
+    def validate(self):
+        descriptor = self.candidate
+        kind = descriptor.get('kind') if isinstance(descriptor, dict) else None
+        _closed_version(descriptor, PRODUCT_KEYS if kind == 'product_bundle' else EVAL_KEYS, 1, 'target candidate')
+        if kind not in ('product_bundle', 'disposable_evaluation_candidate'):
+            raise ValueError('unknown candidate kind')
+        hashes(descriptor, PRODUCT_KEYS - {'schema_version', 'kind', 'counts', 'record_count', 'method', 'edition', 'freeze_sha256'})
+        counts = closed(descriptor['counts'], {'converted', 'unresolved', 'quarantined'}, 'candidate counts')
+        if (any(type(value) is not int or value < 0 for value in counts.values()) or
+                type(descriptor['record_count']) is not int or sum(counts.values()) != descriptor['record_count']):
+            raise ValueError('candidate record accounting mismatch')
+        if kind == 'disposable_evaluation_candidate':
+            hashes(descriptor, EVAL_KEYS - PRODUCT_KEYS - {'product_loadable', 'product_approval'})
+            if (descriptor['method'] not in ('B0', 'B1', 'C0', 'R0', 'R1') or
+                    descriptor['product_loadable'] is not False or descriptor['product_approval'] != 'absent'):
+                raise ValueError('evaluator candidate cannot be product approval')
+            text(descriptor['edition'], 'edition'); hashes(descriptor, ('freeze_sha256',))
+            _sealed(descriptor, 'candidate_sha256')
+        elif any(descriptor[key] is not None for key in ('method', 'edition', 'freeze_sha256')):
+            raise ValueError('product target cannot impersonate an evaluator arm')
+        if any(not is_sha(pin) for pin in (self.authority_sha256, self.target_config_sha256, self.observer_code_sha256)):
+            raise ValueError('separately approved target/authority/observer pins required')
+        target = closed(self.target, {'database', 'role', 'host', 'port', 'server_version_num',
+            'authority_reference', 'scope', 'driver_version'}, 'actual target')
+        if (target['authority_reference'] != self.authority_sha256 or target['scope'] != 'disposable_local_test'
+                or target['host'] not in ('127.0.0.1', '::1') or type(target['port']) is not int
+                or not 1 <= target['port'] <= 65535 or target['port'] in (20178, 20179, 55490)
+                or type(target['server_version_num']) is not int):
+            raise ValueError('unapproved target scope')
+        for name in ('database', 'role', 'driver_version'):
+            text(target[name], name, 200)
+        if (not isinstance(self.columns, list) or len(self.columns) != 8 or
+                any(not isinstance(column, list) or len(column) != 5 for column in self.columns)):
+            raise ValueError('exact eight-column catalog contract required')
+        names = [column[0] for column in self.columns]
+        if names != ['source_sha256', 'ordinal', 'raw_sha256', *FIELDS]:
+            raise ValueError('catalog names/order cannot repair wrong semantic targets')
+        for name, kind, nullable, precision, scale in self.columns:
+            expected = 'bigint' if name == 'ordinal' else 'numeric' if name == 'balance' else 'date' if name == 'effective_date' else 'text'
+            if kind != expected or nullable not in ('YES', 'NO'):
+                raise ValueError('target catalog semantic type/null contract mismatch')
+            if name == 'balance' and (type(precision) is not int or type(scale) is not int or
+                                      scale not in (0, 2, 3) or not scale <= precision <= 38):
+                raise ValueError('exact declared numeric precision/scale required')
+        if len(self.required_negatives) != len(STATES) or set(self.required_negatives) != set(STATES):
+            raise ValueError('closed finite negative suite required')
+        return self
+
+
+def _observation(value, expected):
+    item = _closed_version(value, OBS_KEYS, 2, 'v2 target observation')
+    _sealed(item, 'observation_sha256')
+    if item['kind'] != 'target_observation' or item['candidate'] != expected.candidate:
+        raise ValueError('observation candidate differs from externally pinned target')
+    for key in ('authority_sha256', 'target_config_sha256', 'observer_code_sha256'):
+        if item[key] != getattr(expected, key):
+            raise ValueError('wrong observation ' + key)
+    if item['target'] is not None and item['target'] != expected.target:
+        raise ValueError('wrong actual target/version/role')
+    attempt = closed(item['attempt'], {'execution_id', 'attempt_id', 'namespace', 'write_connection_id',
+        'read_connection_id', 'prior_observation_sha256'}, 'target attempt')
+    _uuid(attempt['execution_id']); _uuid(attempt['attempt_id']); _namespace(attempt['namespace'])
+    if any(attempt[key] is not None and not is_sha(attempt[key]) for key in
+           ('write_connection_id', 'read_connection_id', 'prior_observation_sha256')):
+        raise ValueError('unbound connection/recovery identity')
+    if item['commit_state'] not in ('not_run', 'failed', 'indeterminate', 'committed'):
+        raise ValueError('unknown commit state')
+    if not isinstance(item['issues'], list) or not isinstance(item['negative_effects'], list) or len(item['negative_effects']) > 7:
+        raise ValueError('bounded issues/effects required')
+    for issue in item['issues']:
+        if (not isinstance(issue, dict) or 'code' not in issue or set(issue) - {'code', 'error_type'}
+                or any(not isinstance(value, str) or len(value) > 100 for value in issue.values())):
+            raise ValueError('unknown observation issue fields')
+    if item['readback'] is not None:
+        rb = closed(item['readback'], {'capture', 'query_sha256', 'columns', 'rows', 'rows_sha256'}, 'readback wire')
+        if not isinstance(rb['rows'], list) or len(rb['rows']) > 10000:
+            raise ValueError('bounded concrete readback rows required')
+        for row in rb['rows']:
+            closed(row, {'record_ref', 'mapping_sha256', 'outcome', 'values'}, 'observed row wire')
+    for effect in item['negative_effects']:
+        _closed_version(effect, EFFECT_KEYS, 1, 'negative effect wire')
+        _sealed(effect, 'effect_sha256')
+        for key in ('before', 'after'):
+            if effect[key] is not None:
+                _snapshot(effect[key])
+        if effect['transaction'] is not None:
+            closed(effect['transaction'], {'connection_id', 'statement_sha256', 'sqlstate', 'error_class'}, 'transaction wire')
+    if item['recovery'] is not None:
+        closed(item['recovery'], {'prior_observation_sha256', 'marker_query_sha256', 'marker_rows',
+            'marker_rows_sha256', 'read_connection_id'}, 'recovery wire')
+    return item
+
+
+def _snapshot(value):
+    snap = closed(value, {'connection_id', 'query_sha256', 'namespace_exists', 'table_exists',
+        'rows', 'rows_sha256', 'rows_capture'}, 'durable namespace snapshot')
+    hashes(snap, ('connection_id', 'query_sha256', 'rows_sha256'))
+    if (type(snap['namespace_exists']) is not bool or type(snap['table_exists']) is not bool
+            or not isinstance(snap['rows'], list) or snap['rows_sha256'] != digest(snap['rows'])
+            or snap['rows_capture'] not in ('relation_absent', 'all_persisted_provenance_rows')):
+        raise ValueError('invalid durable-effect capture')
+    return snap
+
+
+def _effect(value, observation, expected, *, failed_load=False):
+    item = _closed_version(value, EFFECT_KEYS, 1, 'negative effect')
+    _sealed(item, 'effect_sha256')
+    if item['kind'] != 'negative_effect' or item['probe_kind'] not in (*STATES, 'failed_load'):
+        raise ValueError('unknown negative effect')
+    for key in ('authority_sha256', 'target_config_sha256', 'observer_code_sha256'):
+        if item[key] != getattr(expected, key):
+            raise ValueError('negative effect lineage mismatch')
+    if (item['candidate_sha256'] != expected.candidate['candidate_sha256'] or
+            item['source_sha256'] != expected.candidate['source_sha256'] or item['target'] != expected.target
+            or item['execution_id'] != observation['attempt']['execution_id']):
+        raise ValueError('negative effect belongs to another execution/candidate/target')
+    _namespace(item['namespace']); _uuid(item['attempt_id'])
+    if not failed_load and item['namespace'] == observation['attempt']['namespace']:
+        raise ValueError('negative probes must use their own fresh namespace')
+    if failed_load and item['namespace'] != observation['attempt']['namespace']:
+        raise ValueError('failed-load absence must observe the actual failed namespace')
+    if not failed_load and item['probe_kind'] not in STATES:
+        raise ValueError('failed-load evidence must be a separate failed attempt')
+    if item['transaction_state'] in ('not_run', 'not_applicable', 'indeterminate'):
+        return {'kind': item['probe_kind'], 'status': 'missing', 'effect_sha256': item['effect_sha256']}
+    if item['transaction_state'] != 'rolled_back' or item['issues']:
+        raise ValueError('failed/incomplete negative probe')
+    before, after = _snapshot(item['before']), _snapshot(item['after'])
+    tx = closed(item['transaction'], {'connection_id', 'statement_sha256', 'sqlstate', 'error_class'}, 'server failure')
+    hashes(tx, ('connection_id', 'statement_sha256'))
+    if len({before['connection_id'], tx['connection_id'], after['connection_id']}) != 3:
+        raise ValueError('negative observation did not use distinct actual connections')
+    if any(snap['namespace_exists'] or snap['table_exists'] or snap['rows'] or
+           snap['rows_capture'] != 'relation_absent' for snap in (before, after)):
+        raise ValueError('failed load left durable namespace/table/rows or was not fresh')
+    text(tx['error_class'], 'server error class')
+    allowed = {'failed_load': None, **STATES}[item['probe_kind']]
+    if (not isinstance(tx['sqlstate'], str) or re.fullmatch('[0-9A-Z]{5}', tx['sqlstate']) is None
+            or (allowed is not None and tx['sqlstate'] not in allowed)):
+        raise ValueError('required actual PostgreSQL failure not observed')
+    return {'kind': item['probe_kind'], 'status': 'observed', 'effect_sha256': item['effect_sha256']}
+
+
+def _recovery(observation, prior, expected, valid_count):
+    if observation['recovery'] is None or prior is None:
+        return False
+    old = _observation(prior, expected)
+    if old['commit_state'] != 'indeterminate':
+        raise ValueError('lost-ACK evidence requires the actual unknown-commit predecessor')
+    a, b = observation['attempt'], old['attempt']
+    if any(a[key] != b[key] for key in ('execution_id', 'namespace', 'write_connection_id')) or a['attempt_id'] == b['attempt_id']:
+        raise ValueError('lost-ACK recovery changed original run identity')
+    value = closed(observation['recovery'], {'prior_observation_sha256', 'marker_query_sha256', 'marker_rows',
+        'marker_rows_sha256', 'read_connection_id'}, 'durable recovery marker')
+    hashes(value, ('prior_observation_sha256', 'marker_query_sha256', 'marker_rows_sha256', 'read_connection_id'))
+    if (value['prior_observation_sha256'] != old['observation_sha256'] or
+            a['prior_observation_sha256'] != old['observation_sha256'] or value['read_connection_id'] != a['read_connection_id']
+            or value['marker_rows_sha256'] != digest(value['marker_rows'])):
+        raise ValueError('recovery marker lineage/hash mismatch')
+    marker = {'execution_id': a['execution_id'], 'candidate': expected.candidate,
+              'authority_sha256': expected.authority_sha256, 'target_config_sha256': expected.target_config_sha256,
+              'row_count': valid_count}
+    rows = [[a['execution_id'], expected.candidate['candidate_sha256'], expected.authority_sha256,
+             canonical(marker).decode('utf-8')]]
+    if value['marker_rows'] != rows:
+        raise ValueError('missing/extra/duplicate/wrong durable execution marker')
+    return observation['readback']['capture'] == 'fresh_connection_reconciliation'
+
+
+def _readback_report(valid, item, expected, edition):
+    rb = closed(item['readback'], {'capture', 'query_sha256', 'columns', 'rows', 'rows_sha256'}, 'readback')
+    hashes(rb, ('query_sha256', 'rows_sha256'))
+    if rb['rows_sha256'] != digest(rb['rows']) or rb['columns'] != expected.columns:
+        raise ValueError('actual row hash/type/null/precision/scale catalog mismatch')
+    a = item['attempt']
+    if (item['commit_state'] != 'committed' or not is_sha(a['write_connection_id']) or not is_sha(a['read_connection_id']) or
+            a['write_connection_id'] == a['read_connection_id'] or item['target'] != expected.target or
+            rb['capture'] not in ('fresh_connection_after_commit', 'fresh_connection_reconciliation')):
+        raise ValueError('readback lacks committed fresh target connection')
+    kinds = {column[0]: 'decimal' if column[1] == 'numeric' else column[1] for column in rb['columns']}
+    if not isinstance(rb['rows'], list):
+        raise ValueError('readback rows must be concrete list')
+    outcomes = []
+    for row in rb['rows']:
+        closed(row, {'record_ref', 'mapping_sha256', 'outcome', 'values'}, 'target row')
+        identity(row['record_ref'])
+        if row['mapping_sha256'] != expected.candidate['mapping_sha256'] or row['outcome'] != 'converted':
+            raise ValueError('wrong target row mapping/outcome')
+        if not isinstance(row['values'], dict):
+            raise ValueError('typed semantic values required')
+        outcomes.append({'record_ref': row['record_ref'], 'outcome': 'converted',
+            'fields': {name: {'data_type': kinds.get(name), 'value': value} for name, value in row['values'].items()}})
+    return score(valid, outcomes, edition=edition)
+
+
+def grade_target(oracle: list[dict], observation: dict | None, *, expectation: TargetExpectation,
+                 prior: dict | None = None, failed_load: dict | None = None,
+                 recovery_observation: dict | None = None, edition='development') -> dict:
+    """Only actual exact readback + required durable effects can yield passed."""
+    expectation.validate()
+    valid = [row for row in oracle if row['expected_outcome'] == 'converted']
+    empty = score(valid, [], edition=edition)
+    base = {'schema_version': 1, 'candidate_sha256': expectation.candidate['candidate_sha256'],
+            'edition': edition, 'score': empty, 'target_validation': 'not_run',
+            'product_acceptance': 'pending', 'negative_effects': [], 'missing': []}
+    if observation is None:
+        return {**base, 'reason': 'no observation'}
+    try:
+        descriptor = expectation.candidate
+        if (descriptor['record_count'] != len(oracle) or descriptor['counts']['converted'] != len(valid)
+                or descriptor['counts']['unresolved'] or any(row['record_ref']['source_sha256'] != descriptor['source_sha256']
+                or row['record_ref']['framing_sha256'] != descriptor['framing_sha256'] for row in oracle)):
+            raise ValueError('candidate/input/oracle accounting or source identity mismatch')
+        item = _observation(observation, expectation)
+        if item['commit_state'] != 'committed':
+            return {**base, 'target_validation': {'failed': 'failed', 'indeterminate': 'indeterminate',
+                    'not_run': 'not_run'}[item['commit_state']], 'reason': 'no committed readback',
+                    'observation_sha256': item['observation_sha256']}
+        a = item['attempt']
+        report = _readback_report(valid, item, expectation, edition)
+        base.update(score=report, observation_sha256=item['observation_sha256'])
+        if report['row_parity'] != 'exact':
+            return {**base, 'target_validation': 'failed', 'reason': 'independent semantic/identity mismatch'}
+        seen, attempts, namespaces = set(), set(), set()
+        for effect in item['negative_effects']:
+            result = _effect(effect, item, expectation)
+            if effect['probe_kind'] in seen or effect['attempt_id'] in attempts or effect['namespace'] in namespaces:
+                raise ValueError('duplicated probe/attempt/namespace cannot satisfy distinct effects')
+            seen.add(effect['probe_kind']); attempts.add(effect['attempt_id']); namespaces.add(effect['namespace'])
+            base['negative_effects'].append(result)
+        observed = {entry['kind'] for entry in base['negative_effects'] if entry['status'] == 'observed'}
+        base['missing'] = sorted(set(expectation.required_negatives) - observed)
+        recovered = _observation(recovery_observation, expectation) if recovery_observation is not None else item
+        if recovery_observation is not None and _readback_report(valid, recovered, expectation, edition)['row_parity'] != 'exact':
+            raise ValueError('recovery readback disagrees with independent oracle')
+        if not _recovery(recovered, prior, expectation, len(valid)):
+            base['missing'].append('lost_ack_reconciliation')
+        if failed_load is None:
+            base['missing'].append('failed_load_durable_absence')
+        else:
+            failed = _observation(failed_load, expectation)
+            if failed['commit_state'] != 'failed' or failed['attempt']['execution_id'] == a['execution_id']:
+                raise ValueError('separate actual failed-load observation required')
+            entries = [effect for effect in failed['negative_effects'] if effect['probe_kind'] == 'failed_load']
+            if len(entries) != 1 or _effect(entries[0], failed, expectation, failed_load=True)['status'] != 'observed':
+                base['missing'].append('failed_load_durable_absence')
+        if item['issues']:
+            base['missing'].append('unresolved_observation_issues')
+        return {**base, 'target_validation': 'indeterminate' if base['missing'] else 'passed',
+                'reason': 'missing actual effects' if base['missing'] else 'exact readback and required effects observed'}
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        return {**base, 'target_validation': 'failed', 'reason': str(exc)}

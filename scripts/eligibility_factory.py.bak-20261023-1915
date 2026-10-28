@@ -1,0 +1,38 @@
+"""Ready evaluator-owned T1/T3 caller factory. No signer or hidden asset creation.
+
+Operator trust comes from explicit CLI public-profile arguments, never candidate
+JSON. The packet names only existing metadata/evidence under its declared root.
+"""
+from pathlib import Path
+
+
+def factory(context):
+    from la.app.artifacts import within,read
+    from la.app.public_trust import public_keys
+    from evaluation.eligibility import ReceiptVerifier
+    from evaluation.edition_registry import EditionRegistry,EligibilityContext
+    from evaluation.public_live import PublicLiveContext
+    if type(context) is not dict or set(context)!={'store','evidence_root','packet','public_trust_root','public_trust_profile'}:
+        raise ValueError('explicit evaluator store/root/public trust required')
+    root=Path(context['evidence_root']).resolve(strict=True)
+    packet=context['packet']
+    common={'phase','registry','authority_receipt'}
+    phase=packet.get('phase') if type(packet) is dict else None
+    required=common|({'catalog'} if phase=='T1' else {'commitment','freeze','suite','probe_receipt','review_receipts'})
+    if type(packet) is not dict or phase not in ('T1','T3') or set(packet)!=required:
+        raise ValueError('closed explicit T1 or T3 context packet required')
+    verifier=ReceiptVerifier(*public_keys(context['public_trust_root'],context['public_trust_profile']))
+    registry=EditionRegistry(within(root,packet['registry'],exists=True),context['store'])
+    authority=read(within(root,packet['authority_receipt'],exists=True))
+    if phase=='T1':
+        result=PublicLiveContext(registry,read(within(root,packet['catalog'],exists=True)),authority,verifier)
+    else:
+        reviews=packet['review_receipts']
+        if type(reviews) is not list or len(reviews)!=6:
+            raise ValueError('six distinct isolation review receipt paths required')
+        result=EligibilityContext(registry,read(within(root,packet['commitment'],exists=True)),
+            read(within(root,packet['freeze'],exists=True)),read(within(root,packet['suite'],exists=True)),
+            read(within(root,packet['probe_receipt'],exists=True)),
+            [read(within(root,name,exists=True)) for name in reviews],authority,verifier)
+    result.validate()
+    return result

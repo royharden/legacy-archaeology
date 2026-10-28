@@ -1,0 +1,139 @@
+"""Separate pinned product/evaluator candidates; no product approvals are fabricated."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+from pathlib import Path
+import re
+
+from la.review import digest
+from la.convert import sql_artifacts, transform_proposal, validate_proposal
+from la.convert.bundle import load_snapshot
+from la.convert.provenance import producer_code_pin
+
+PRODUCT_KEYS = {'schema_version', 'kind', 'candidate_sha256', 'source_sha256', 'framing_sha256',
+                'mapping_sha256', 'config_sha256', 'producer_code_sha256', 'counts', 'record_count',
+                'method', 'edition', 'freeze_sha256'}
+EVALUATION_KEYS = PRODUCT_KEYS | {'sample_artifact_sha256', 'schema_sha256', 'load_sha256',
+                                 'outcomes_sha256', 'rows_sha256', 'product_loadable', 'product_approval'}
+
+
+def is_sha(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def observer_code_pin():
+    root = Path(__file__).parent
+    return digest({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.glob('*.py'))})
+
+
+def validate_descriptor(value):
+    if not isinstance(value, dict) or value.get('kind') not in ('product_bundle', 'disposable_evaluation_candidate') or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
+        raise ValueError('typed target candidate descriptor required')
+    expected = PRODUCT_KEYS if value['kind'] == 'product_bundle' else EVALUATION_KEYS
+    if set(value) != expected: raise ValueError('unknown target descriptor members')
+    for key in expected:
+        if key.endswith('_sha256') and key != 'freeze_sha256' and not is_sha(value[key]):
+            raise ValueError('invalid candidate pin')
+    counts = value['counts']
+    if not isinstance(counts, dict) or set(counts) != {'converted', 'unresolved', 'quarantined'} or any(type(v) is not int or v < 0 for v in counts.values()) or type(value['record_count']) is not int or not 0 <= value['record_count'] <= 10000 or sum(counts.values()) != value['record_count']:
+        raise ValueError('invalid candidate record accounting')
+    if value['kind'] == 'product_bundle':
+        if any(value[key] is not None for key in ('method', 'edition', 'freeze_sha256')):
+            raise ValueError('product candidate cannot masquerade as an evaluation arm')
+    elif value['method'] not in ('B0', 'B1', 'C0', 'R0', 'R1') or not isinstance(value['edition'], str) or not value['edition'] or not is_sha(value['freeze_sha256']) or value['product_loadable'] is not False or value['product_approval'] != 'absent' or digest({k: v for k, v in value.items() if k != 'candidate_sha256'}) != value['candidate_sha256']:
+        raise ValueError('invalid non-product evaluation candidate identity')
+    return value
+
+
+@dataclass(frozen=True)
+class PreparedCandidate:
+    descriptor: dict
+    mapping: dict
+    rows: list
+    ddl: str
+    sql: str
+    columns: list
+
+
+def prepare_evaluation_candidate(batch, proposal, *, edition, freeze_sha256):
+    """Pure source conversion; result is never a MappingSpec, approval or product bundle."""
+    if not isinstance(edition, str) or not edition.strip() or len(edition) > 200 or not is_sha(freeze_sha256):
+        raise ValueError('frozen evaluator edition and hash required')
+    validate_proposal(batch, proposal)
+    result = transform_proposal(batch, proposal)
+    mapping = {'mapping_status': 'complete', 'mapping_sha256': proposal['proposal_sha256'],
+               'fields': proposal['fields'], 'width': proposal['width'], 'unresolved': []}
+    ddl, sql, columns = sql_artifacts(mapping)
+    rows = [row for row in result['outcomes'] if row['outcome'] == 'converted']
+    descriptor = {'schema_version': 1, 'kind': 'disposable_evaluation_candidate',
+                  'method': proposal['method'], 'edition': edition, 'freeze_sha256': freeze_sha256,
+                  'source_sha256': batch['source_sha256'], 'framing_sha256': batch['framing_sha256'],
+                  'mapping_sha256': proposal['proposal_sha256'], 'config_sha256': batch['config_sha256'],
+                  'sample_artifact_sha256': batch['samples']['artifact_sha256'],
+                  'producer_code_sha256': producer_code_pin(),
+                  'schema_sha256': hashlib.sha256(ddl.encode()).hexdigest(),
+                  'load_sha256': hashlib.sha256(sql.encode()).hexdigest(),
+                  'outcomes_sha256': digest(result['outcomes']), 'rows_sha256': digest(rows),
+                  'counts': {kind: sum(o['outcome'] == kind for o in result['outcomes'])
+                             for kind in ('converted', 'unresolved', 'quarantined')},
+                  'record_count': len(result['outcomes']), 'product_loadable': False,
+                  'product_approval': 'absent'}
+    descriptor['candidate_sha256'] = digest(descriptor)
+    validate_descriptor(descriptor)
+    return {'kind': 'disposable_evaluation_candidate', 'descriptor': descriptor,
+            'batch': batch, 'proposal': proposal}
+
+
+def resolve_candidate(artifact, config):
+    """Only code-owned deterministic SQL is returned, for either candidate kind."""
+    if not isinstance(artifact, dict): raise ValueError('closed target artifact required')
+    if artifact.get('kind') == 'product_bundle':
+        if set(artifact) != {'kind', 'bundle_path'} or config.expected_bundle_sha256 is None:
+            raise ValueError('product candidate requires externally pinned bundle path')
+        snapshot, _ = load_snapshot(artifact['bundle_path'], expected_bundle_sha256=config.expected_bundle_sha256,
+                                    expected_source_sha256=config.expected_source_sha256,
+                                    expected_mapping_sha256=config.expected_mapping_sha256)
+        manifest = snapshot.manifest
+        descriptor = {'schema_version': 1, 'kind': 'product_bundle', 'candidate_sha256': manifest['bundle_sha256'],
+                      'source_sha256': manifest['source_sha256'], 'framing_sha256': snapshot.batch['framing_sha256'],
+                      'mapping_sha256': manifest['mapping_sha256'], 'config_sha256': manifest['config_sha256'],
+                      'producer_code_sha256': manifest['producer_code_sha256'],
+                      'counts': manifest['counts'], 'record_count': manifest['record_count'],
+                      'method': None, 'edition': None, 'freeze_sha256': None}
+        return PreparedCandidate(descriptor, snapshot.mapping, snapshot.rows, snapshot.ddl, snapshot.sql, snapshot.columns)
+    if artifact.get('kind') != 'disposable_evaluation_candidate' or set(artifact) != {'kind', 'descriptor', 'batch', 'proposal'}:
+        raise ValueError('unknown target candidate kind/members')
+    descriptor = artifact['descriptor']
+    rebuilt = prepare_evaluation_candidate(artifact['batch'], artifact['proposal'],
+                                           edition=descriptor['edition'], freeze_sha256=descriptor['freeze_sha256'])
+    if rebuilt['descriptor'] != descriptor or config.expected_candidate_sha256 != descriptor['candidate_sha256']:
+        raise ValueError('evaluation candidate does not match external pin or recomputed source')
+    result = transform_proposal(artifact['batch'], artifact['proposal'])
+    mapping = {'mapping_status': 'complete', 'mapping_sha256': descriptor['mapping_sha256'],
+               'fields': artifact['proposal']['fields'], 'width': artifact['proposal']['width'], 'unresolved': []}
+    ddl, sql, columns = sql_artifacts(mapping)
+    return PreparedCandidate(descriptor, mapping, [o for o in result['outcomes'] if o['outcome'] == 'converted'], ddl, sql, columns)
+
+
+def verify_authority(authority, candidate, config, operation):
+    keys = {'schema_version', 'kind', 'authority_id', 'scope', 'candidate_sha256', 'source_sha256',
+            'method', 'edition', 'freeze_sha256', 'observer_code_sha256', 'operations', 'authority_sha256'}
+    if not isinstance(authority, dict) or set(authority) != keys or type(authority['schema_version']) is not int or authority['schema_version'] != 1 or authority['kind'] != 'disposable_target_authority':
+        raise ValueError('closed pinned target authority required; success flags are not authority')
+    if not isinstance(authority['authority_id'], str) or not authority['authority_id'].strip() or len(authority['authority_id']) > 200:
+        raise ValueError('named target authority required')
+    if not is_sha(authority['authority_sha256']) or digest({k: v for k, v in authority.items() if k != 'authority_sha256'}) != authority['authority_sha256'] or config.authority_reference != authority['authority_sha256']:
+        raise ValueError('target authority does not match externally configured authority pin')
+    descriptor = candidate.descriptor
+    validate_descriptor(descriptor)
+    scope = 'product_bundle' if descriptor['kind'] == 'product_bundle' else 'disposable_evaluation'
+    if authority['scope'] != scope or any(authority[key] != descriptor[key] for key in ('candidate_sha256', 'source_sha256', 'method', 'edition', 'freeze_sha256')):
+        raise ValueError('authority candidate/source/method/edition/freeze scope mismatch')
+    if authority['observer_code_sha256'] != observer_code_pin():
+        raise ValueError('authority observer code pin is stale')
+    operations = authority['operations']
+    if not isinstance(operations, list) or any(item not in ('load', 'negative_probes', 'reconcile') for item in operations) or len(set(operations)) != len(operations) or operation not in operations:
+        raise ValueError('target operation has no pinned authority')
+    config.validate()
+    return authority['authority_sha256']

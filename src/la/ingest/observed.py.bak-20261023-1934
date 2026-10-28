@@ -1,0 +1,220 @@
+"""Refusal-only observations from a caller-owned completed bounded-memory read.
+
+No bytes, path access or file identity probes occur here. Caller attestations
+are structurally checked, never presented as independently executed evidence.
+"""
+import re
+from la.contracts import digest, sha256, validate_batch
+from .limits import LIMITS
+MAX_OBSERVED_INTEGER = (1 << 63) - 1
+MAX_SAMPLE_PIN_BYTES = 16 * 1024 * 1024
+PIN_KEYS = {'before_identity_sha256', 'after_identity_sha256', 'reader_policy_sha256'}
+REFUSAL_REASONS = {'file_limit', 'record_limit', 'brief_limit', 'unsupported_encoding',
+                   'unsupported_record_family', 'unsupported_packed_decimal', 'unsupported_numeric',
+                   'input_changed_during_read', 'observed_count_unknown'}
+
+
+def _sha(value, name):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+        raise ValueError(f'{name} requires an exact lowercase SHA256 digest')
+    return value
+
+
+def _count(value, name):
+    if type(value) is not int or not 0 <= value <= MAX_OBSERVED_INTEGER:
+        raise ValueError(f'{name} requires an exact nonnegative signed64 integer')
+    return value
+
+
+def _reasons(declarations, byte_count, record_count, brief_count, stable):
+    reasons = set()
+    if byte_count > LIMITS['bytes']: reasons.add('file_limit')
+    if record_count is not None and record_count > LIMITS['records']: reasons.add('record_limit')
+    if brief_count > LIMITS['brief']: reasons.add('brief_limit')
+    if declarations['encoding'].upper() != 'ASCII': reasons.add('unsupported_encoding')
+    if declarations['record_family'] != 'fixed-width': reasons.add('unsupported_record_family')
+    if declarations['numeric'] != 'ascii':
+        reasons.add('unsupported_packed_decimal' if declarations['numeric'] == 'packed_decimal' else 'unsupported_numeric')
+    if not stable: reasons.add('input_changed_during_read')
+    if record_count is None: reasons.add('observed_count_unknown')
+    return reasons
+
+
+def _config(declarations):
+    return {'limits': LIMITS, 'declarations': declarations, 'stream_refusal_version': 1,
+            'max_observed_integer': MAX_OBSERVED_INTEGER, 'max_sample_pin_bytes': MAX_SAMPLE_PIN_BYTES}
+
+
+def _sample_pins(permitted_samples):
+    """Hash bounded JSON without pretending that missing raw bytes validate refs."""
+    if permitted_samples is None:
+        artifact_hash = content_hash = None
+        received = False
+    else:
+        if not isinstance(permitted_samples, dict): raise ValueError('sample artifact must be a JSON object or None')
+        budget = {'nodes': 0, 'bytes': 0}
+        def inspect(value, depth=0):
+            budget['nodes'] += 1
+            if depth > 12 or budget['nodes'] > 200000: raise ValueError('sample pin structure limit')
+            if isinstance(value, str): budget['bytes'] += len(value.encode('utf-8'))
+            elif value is None or type(value) is bool: pass
+            elif type(value) is int:
+                if not -MAX_OBSERVED_INTEGER <= value <= MAX_OBSERVED_INTEGER:
+                    raise ValueError('sample pin integer limit')
+            elif isinstance(value, list):
+                for item in value: inspect(item, depth + 1)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    if not isinstance(key, str): raise ValueError('sample pin JSON keys must be strings')
+                    inspect(key, depth + 1); inspect(item, depth + 1)
+            else: raise ValueError('sample pin JSON value type invalid')
+            if budget['bytes'] > MAX_SAMPLE_PIN_BYTES: raise ValueError('sample pin byte limit')
+        inspect(permitted_samples)
+        artifact_hash = digest(permitted_samples)
+        content_hash = digest({key: value for key, value in permitted_samples.items() if key != 'artifact_sha256'})
+        received = True
+    return {'authorization': '', 'artifact_sha256': artifact_hash, 'content_sha256': content_hash,
+            'artifact_received': received, 'validation_status': 'unvalidated_without_source_bytes' if received else 'not_provided',
+            'record_references_validated': False, 'records': [], 'authorized_spans': [],
+            'selected_ordinals': [], 'selected_artifact_indices': [], 'selected_byte_count': 0,
+            'authorized_count': 0, 'truncated': False, 'selection_policy': 'no_stream_refusal_authority',
+            'selection_sha256': digest([])}
+
+
+def refuse_observed_input(*, source_sha256: str, input_byte_count: int, observed_count: int | None,
+                         reason: str, brief: str = '', permitted_samples=None,
+                         terminal_newline=None, observation_stable=True, observation_complete=True,
+                         declared_encoding='ASCII', declared_record_type='fixed-width',
+                         declared_numeric='ascii', declared_family=None, observation_pins=None) -> dict:
+    """Build only an unmaterialized refusal from a complete observed-stream hash.
+
+    Unknown row count stays None. Unstable full-read bytes identify the observed
+    stream, not a stable original file. Prefix/incomplete observations cannot
+    supply source_sha256 under the existing SourceBatch contract and are rejected.
+    """
+    source_sha256 = _sha(source_sha256, 'source_sha256')
+    input_byte_count = _count(input_byte_count, 'input_byte_count')
+    if observed_count is not None:
+        _count(observed_count, 'observed_count')
+        if observed_count > input_byte_count or (input_byte_count > 0 and observed_count == 0):
+            raise ValueError('observed count contradicts completed-stream byte count')
+    if type(observation_complete) is not bool or not observation_complete:
+        raise ValueError('incomplete/prefix digest cannot identify the full source stream')
+    if type(observation_stable) is not bool: raise ValueError('observation_stable must be a boolean')
+    if terminal_newline is not None and type(terminal_newline) is not bool:
+        raise ValueError('terminal_newline must be boolean or unknown None')
+    if input_byte_count == 0 and (terminal_newline is True or source_sha256 != sha256(b'')):
+        raise ValueError('empty-stream observations contradict bytes/hash')
+    if not isinstance(brief, str): raise ValueError('brief must be text')
+    if declared_family is not None: declared_record_type = declared_family
+    declarations = {'encoding': declared_encoding, 'record_family': declared_record_type, 'numeric': declared_numeric}
+    if any(not isinstance(value, str) or not value or len(value) > 128 for value in declarations.values()):
+        raise ValueError('bounded explicit format declarations required')
+    if not isinstance(reason, str) or reason not in REFUSAL_REASONS:
+        raise ValueError('unsupported streamed refusal reason')
+    pins = {} if observation_pins is None else observation_pins
+    if not isinstance(pins, dict) or set(pins) - PIN_KEYS:
+        raise ValueError('observation pins accept hashes only, never paths or arbitrary metadata')
+    pins = {key: _sha(value, key) for key, value in pins.items()}
+    before, after = pins.get('before_identity_sha256'), pins.get('after_identity_sha256')
+    if observation_stable and before is not None and after is not None and before != after:
+        raise ValueError('stable observation contradicts before/after identity pins')
+    applicable = _reasons(declarations, input_byte_count, observed_count, len(brief), observation_stable)
+    if reason not in applicable: raise ValueError('refusal reason is not supported by the supplied observations')
+    samples = _sample_pins(permitted_samples)
+    observations = {'schema_version': 1, 'kind': 'caller_completed_stream_observation',
+                    'source_sha256': source_sha256, 'input_byte_count': input_byte_count,
+                    'observed_count': observed_count, 'terminal_newline': terminal_newline,
+                    'brief_sha256': sha256(brief.encode('utf-8')), 'brief_character_count': len(brief),
+                    'sample_artifact_sha256': samples['artifact_sha256'],
+                    'complete': True, 'stable_claim': observation_stable, 'identity_pins': pins,
+                    'stability_state': 'unstable' if not observation_stable else 'identity_pins_agree' if before is not None and after == before else 'not_independently_attested',
+                    'hash_scope': 'complete_observed_stream', 'source_reconstructed': False,
+                    'file_identity_probed_by_producer': False}
+    observations['observation_sha256'] = digest(observations)
+    descriptor = {'version': 3, 'kind': 'unmaterialized_stream_refusal', 'framing': 'unresolved',
+                  'width': None, 'width_candidates': [], 'terminal_newline': terminal_newline,
+                  'observation_sha256': observations['observation_sha256']}
+    intake = {'framing_policy': descriptor, 'separators': [], 'width_histogram': [], 'width_candidates': [],
+              'width_status': 'unresolved', 'width_question': None,
+              'observed_record_count': observed_count, 'materialized_record_count': 0,
+              'unmaterialized_record_count': observed_count, 'bounded_refusal': True,
+              'input_byte_count': input_byte_count, 'terminal_newline': terminal_newline,
+              'final_record_width_valid': None, 'final_record_eligible': None,
+              'record_count_status': 'unknown' if observed_count is None else 'observed_complete_stream',
+              'source_identity_scope': 'complete_observed_stream_not_stable_file' if not observation_stable else 'complete_observed_stream',
+              'source_reconstruction': 'not_available_unmaterialized_stream', 'stream_observation': observations}
+    samples['intake'] = intake
+    return validate_batch({'schema_version': 1, 'source_sha256': source_sha256,
+        'framing_sha256': digest(descriptor), 'framing': 'unresolved', 'encoding': 'ASCII',
+        'declared_format': declarations, 'width': None, 'status': 'refused', 'reasons': sorted(applicable),
+        'records': [], 'brief_sha256': sha256(brief.encode('utf-8')), 'samples': samples, 'intake': intake,
+        'config_sha256': digest(_config(declarations))})
+
+
+def validate_observed_refusal(batch: dict) -> dict:
+    """Check retained observation lineage only; never attest the absent source bytes."""
+    intake = batch.get('intake') or batch.get('samples', {}).get('intake', {})
+    observation = intake.get('stream_observation')
+    if not isinstance(observation, dict): raise ValueError('stream observation metadata missing')
+    if (batch.get('status') != 'refused' or batch.get('records') != [] or batch.get('width') is not None
+            or batch.get('framing') != 'unresolved' or intake.get('bounded_refusal') is not True):
+        raise ValueError('stream observation cannot create accepted/materialized framing')
+    expected_keys = {'schema_version', 'kind', 'source_sha256', 'input_byte_count', 'observed_count',
+                     'terminal_newline', 'brief_sha256', 'brief_character_count', 'sample_artifact_sha256',
+                     'complete', 'stable_claim', 'identity_pins', 'stability_state', 'hash_scope',
+                     'source_reconstructed', 'file_identity_probed_by_producer', 'observation_sha256'}
+    if (set(observation) != expected_keys or type(observation['schema_version']) is not int
+            or observation['schema_version'] != 1 or observation['kind'] != 'caller_completed_stream_observation'
+            or observation['complete'] is not True or type(observation['stable_claim']) is not bool
+            or observation['hash_scope'] != 'complete_observed_stream'
+            or observation['source_reconstructed'] is not False or observation['file_identity_probed_by_producer'] is not False):
+        raise ValueError('stream observation kind/scope invalid')
+    if digest({key: value for key, value in observation.items() if key != 'observation_sha256'}) != observation['observation_sha256']:
+        raise ValueError('stream observation hash mismatch')
+    source_hash = _sha(observation['source_sha256'], 'observed source')
+    byte_count = _count(observation['input_byte_count'], 'observed byte count')
+    brief_count = _count(observation['brief_character_count'], 'observed brief count')
+    count, terminal = observation['observed_count'], observation['terminal_newline']
+    if count is not None:
+        _count(count, 'observed record count')
+        if count > byte_count or byte_count > 0 and count == 0: raise ValueError('observed count inconsistent')
+    if terminal is not None and type(terminal) is not bool: raise ValueError('terminal observation invalid')
+    if byte_count == 0 and (source_hash != sha256(b'') or terminal is True): raise ValueError('empty observation inconsistent')
+    pins = observation['identity_pins']
+    if not isinstance(pins, dict) or set(pins) - PIN_KEYS: raise ValueError('unexpected observation metadata/path')
+    for key, value in pins.items(): _sha(value, key)
+    before, after = pins.get('before_identity_sha256'), pins.get('after_identity_sha256')
+    stable = observation['stable_claim']
+    if stable and before is not None and after is not None and before != after: raise ValueError('unstable identity pins')
+    state = 'unstable' if not stable else 'identity_pins_agree' if before is not None and after == before else 'not_independently_attested'
+    if observation['stability_state'] != state: raise ValueError('stability provenance mismatch')
+    declarations = batch.get('declared_format', {})
+    if set(declarations) != {'encoding', 'record_family', 'numeric'} or any(not isinstance(value, str) or not value or len(value) > 128 for value in declarations.values()):
+        raise ValueError('stream declaration pins invalid')
+    expected_reasons = sorted(_reasons(declarations, byte_count, count, brief_count, stable))
+    if not expected_reasons or batch.get('reasons') != expected_reasons or batch.get('config_sha256') != digest(_config(declarations)):
+        raise ValueError('stream refusal reason/config mismatch')
+    descriptor = {'version': 3, 'kind': 'unmaterialized_stream_refusal', 'framing': 'unresolved',
+                  'width': None, 'width_candidates': [], 'terminal_newline': terminal,
+                  'observation_sha256': observation['observation_sha256']}
+    if intake.get('framing_policy') != descriptor or batch.get('framing_sha256') != digest(descriptor):
+        raise ValueError('stream refusal framing descriptor mismatch')
+    if (batch.get('source_sha256') != source_hash or batch.get('brief_sha256') != observation['brief_sha256']
+            or type(intake.get('input_byte_count')) is not int or intake['input_byte_count'] != byte_count
+            or type(intake.get('materialized_record_count')) is not int or intake['materialized_record_count'] != 0
+            or intake.get('observed_record_count') != count or intake.get('unmaterialized_record_count') != count
+            or type(intake.get('observed_record_count')) is not type(count)
+            or type(intake.get('unmaterialized_record_count')) is not type(count)
+            or intake.get('record_count_status') != ('unknown' if count is None else 'observed_complete_stream')
+            or intake.get('separators') != []):
+        raise ValueError('stream refusal counts/source pins mismatch')
+    _sha(batch['brief_sha256'], 'observed brief')
+    samples = batch.get('samples', {})
+    if (samples.get('artifact_sha256') != observation['sample_artifact_sha256']
+            or samples.get('record_references_validated') is not False or samples.get('authorization') != ''
+            or samples.get('records') != [] or samples.get('authorized_spans') != []
+            or samples.get('selected_ordinals') != [] or samples.get('selection_sha256') != digest([])):
+        raise ValueError('unmaterialized stream cannot validate sample authority')
+    if observation['sample_artifact_sha256'] is not None: _sha(observation['sample_artifact_sha256'], 'sample artifact pin')
+    return observation
