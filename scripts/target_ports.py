@@ -1,0 +1,173 @@
+"""Evaluator-only D5/D6 bridge. No gold, signer or inferred target authority.
+
+All grants/config/expectations are explicit operator files indexed by exact
+prepared candidate identity. No index entry means no target action. Nothing is
+read, prepared, signed or connected on module import.
+"""
+from copy import deepcopy
+from pathlib import Path
+
+
+def prepare(visible,mapping,method,edition,freeze_sha256,*,phase_scope=None):
+    from la.ingest import ingest_bytes
+    from la.contracts import digest
+    from la.postgres import prepare_evaluation_candidate,prepare_evaluation_candidate_v2
+    allowed={'schema_version','source_sha256','source_hex','framing_sha256','record_refs','record_count',
+             'brief','permitted_samples','sample_policy_sha256','batch_manifest','encoding','width'}
+    if type(visible) is not dict or set(visible)-allowed:
+        raise ValueError('only declared visible input may reach target preparation; no oracle keys')
+    batch=ingest_bytes(bytes.fromhex(visible['source_hex']),visible['brief'],visible['permitted_samples'])
+    if batch['source_sha256']!=visible['source_sha256'] or batch['framing_sha256']!=visible['framing_sha256']:
+        raise ValueError('evaluation visible source/framing mismatch')
+    template=mapping.get('evaluator_proposal')
+    if type(template) is not dict or template.get('kind')!='evaluator_proposal' or template.get('method')!=method:
+        raise ValueError('source-bound non-loadable evaluator proposal required')
+    proposal=deepcopy(template)
+    proposal.update(source_sha256=batch['source_sha256'],framing_sha256=batch['framing_sha256'],width=batch['width'])
+    proposal['proposal_sha256']=digest({k:v for k,v in proposal.items() if k!='proposal_sha256'})
+    if phase_scope is not None:
+        if set(phase_scope)!={'evaluation_phase','split','evaluation_plan_sha256','freeze_sha256'}:
+            raise ValueError('closed explicit target phase required')
+        if phase_scope['freeze_sha256']!=freeze_sha256: raise ValueError('conflicting phase freeze')
+        return prepare_evaluation_candidate_v2(batch,proposal,edition=edition,**phase_scope)
+    return prepare_evaluation_candidate(batch,proposal,edition=edition,freeze_sha256=freeze_sha256)
+
+
+def factory(context):
+    from evaluation.target_runner import TargetGrant,TargetPorts
+    from scripts.eval import observation_from
+    from evaluation.target_effects import TargetExpectation
+    from la.app.artifacts import within,read
+    from la.app.observations import target_dsn
+    from la.app.public_trust import public_keys
+    from la.postgres import TargetAuthorityVerifier,TargetConfig,target_observer_v2
+    from la.postgres import collect_controlled_failed_load,collect_controlled_lost_ack
+    from evaluation.eligibility import ReceiptVerifier
+    from la.postgres.candidate import resolve_candidate,verify_authority
+    from la.postgres.effects import NEGATIVE_KINDS
+    from la.contracts import digest
+    if type(context) is not dict or set(context)!={'root','public_trust_root','public_trust_profile','grants','dsn_env'}:
+        raise ValueError('closed evaluator-owned target context required; no oracle/provider secrets')
+    root=Path(context['root']).absolute(); root.resolve(strict=True)
+    index=read(within(root,context['grants'],exists=True))
+    if type(index) is not dict or not 1<=len(index)<=1024:
+        raise ValueError('bounded explicit target-grant index required')
+    if any(type(key) is not str or len(key)!=64 or any(c not in '0123456789abcdef' for c in key) for key in index):
+        raise ValueError('target grants must be indexed by exact candidate SHA256')
+    keys=public_keys(context['public_trust_root'],context['public_trust_profile'])
+    verifier=TargetAuthorityVerifier(*keys)
+    evaluator_verifier=ReceiptVerifier(*keys)
+    loaded={}; experiments={}
+
+    def load(artifact):
+        descriptor=artifact['descriptor']; key=descriptor['candidate_sha256']
+        if key in loaded: return loaded[key]
+        entry=index.get(key)
+        required={'signed_authority','target_config','expectation'}
+        optional={'failed_load','prior','reconciled','collect_failed_load','collect_lost_ack','experiment'}
+        if type(entry) is not dict or not required<=set(entry) or set(entry)-required-optional:
+            raise ValueError('no exact separately approved target-grant entry')
+        for flag in ('collect_failed_load','collect_lost_ack'):
+            if flag in entry and type(entry[flag]) is not bool: raise ValueError('explicit collector selection required')
+        if (entry.get('collect_failed_load') and entry.get('failed_load')) or (entry.get('collect_lost_ack') and (entry.get('prior') or entry.get('reconciled'))):
+            raise ValueError('choose actual stored effects or explicitly authorized collectors')
+        if 'experiment' in entry and any(entry.get(k) for k in ('failed_load','prior','reconciled','collect_failed_load','collect_lost_ack')):
+            raise ValueError('pinned experiment callbacks cannot mix with other effects or new collection')
+        signed=read(within(root,entry['signed_authority'],exists=True))
+        intent=verifier.verify(signed)
+        config=TargetConfig(**read(within(root,entry['target_config'],exists=True))).validate()
+        if config.expected_bundle_sha256 is not None:
+            raise ValueError('evaluation target cannot borrow a product bundle pin')
+        if (config.authority_reference!=intent['authority_sha256'] or
+                config.expected_candidate_sha256 is not None and config.expected_candidate_sha256!=descriptor['candidate_sha256']):
+            raise ValueError('configured external authority/candidate pin contradicts exact grant')
+        for key,pin in (('source_sha256',config.expected_source_sha256),('mapping_sha256',config.expected_mapping_sha256)):
+            if pin is not None and pin!=descriptor[key]: raise ValueError('configured target pin contradicts evaluation candidate')
+        operations=['load','negative_probes','reconcile']
+        if entry.get('collect_failed_load'): operations.append('controlled_failed_load')
+        if entry.get('collect_lost_ack'): operations.append('controlled_commit_ack')
+        if 'experiment' not in entry:
+            prepared=resolve_candidate(artifact,config)
+            for operation in operations: verify_authority(intent,prepared,config,operation)
+        expected=read(within(root,entry['expectation'],exists=True))
+        if 'required_negatives' in expected: expected['required_negatives']=tuple(expected['required_negatives'])
+        expectation=TargetExpectation(**expected).validate()
+        grant=TargetGrant(signed,expectation,evaluator_verifier).validate()
+        if expectation.candidate!=descriptor or expectation.target_config_sha256!=digest(config.public()):
+            raise ValueError('externally configured target expectation differs from actual candidate/config')
+        if 'experiment' in entry:
+            from la.postgres import target_experiment_callbacks
+            packet=entry['experiment']
+            required_packet={'path','expected_experiment_sha256'}
+            later_keys={'expected_reconciliation_sha256','expected_prior_observation_sha256'}
+            if type(packet) is not dict or set(packet) not in (required_packet,required_packet|later_keys):
+                raise ValueError('closed externally pinned experiment reference required')
+            within(root,packet['path'],exists=True)
+            original_path=root/packet['path']
+            if later_keys<=set(packet):
+                from la.postgres import target_reconciliation_callbacks
+                callbacks=target_reconciliation_callbacks(original_path,artifact,signed,
+                    expected_experiment_sha256=packet['expected_experiment_sha256'],
+                    expected_reconciliation_sha256=packet['expected_reconciliation_sha256'],
+                    expected_prior_observation_sha256=packet['expected_prior_observation_sha256'],
+                    target_config=config,authority_verifier=verifier)
+                archived=callbacks.snapshot.experiment.manifest
+            else:
+                callbacks=target_experiment_callbacks(original_path,
+                    expected_experiment_sha256=packet['expected_experiment_sha256'],
+                    expected_candidate_sha256=descriptor['candidate_sha256'],expected_authority_sha256=intent['authority_sha256'])
+                archived=callbacks.snapshot.manifest
+            if (archived['target_config_sha256']!=digest(config.public()) or archived['candidate']!=descriptor
+                    or archived['artifact_sha256']!=digest(artifact) or archived['authority_envelope_sha256']!=digest(signed)
+                    or archived['observer_code_sha256']!=expectation.observer_code_sha256):
+                raise ValueError('experiment target config differs from actual grant')
+            experiments[descriptor['candidate_sha256']]=callbacks
+        loaded[key]=(entry,signed,intent,config,grant)
+        return loaded[key]
+
+    def grant(artifact,scope):
+        entry,signed,intent,config,approved=load(artifact)
+        if any(scope[k]!=artifact['descriptor'][k] for k in ('edition','method','freeze_sha256')):
+            raise ValueError('target scope differs from requested frozen arm')
+        if artifact['descriptor']['schema_version']==2 and any(scope.get(k)!=artifact['descriptor'][k] for k in ('evaluation_phase','split','evaluation_plan_sha256')):
+            raise ValueError('target phase/plan differs from requested arm')
+        return approved
+
+    def observe(artifact,intent):
+        entry,signed,verified,config,approved=load(artifact)
+        if intent!=signed: raise ValueError('target authority changed after grant')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].observe(artifact,signed)
+        # Only after real signature + exact candidate/config checks can DSN be read.
+        dsn=target_dsn(context['dsn_env'],config)
+        return target_observer_v2(artifact,signed,dsn=dsn,target_config=config,
+                                 negative_kinds=NEGATIVE_KINDS,authority_verifier=verifier)
+
+    def failed_load(artifact,intent):
+        entry,signed,verified,config,_=load(artifact)
+        if intent!=signed: raise ValueError('failed-load authority changed')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].failed_load(artifact,signed)
+        if entry.get('collect_failed_load'):
+            return collect_controlled_failed_load(artifact,signed,dsn=target_dsn(context['dsn_env'],config),
+                target_config=config,authority_verifier=verifier)
+        return observation_from(read(within(root,entry['failed_load'],exists=True))) if entry.get('failed_load') else None
+
+    def recovery(artifact,intent):
+        entry,signed,verified,config,_=load(artifact)
+        if intent!=signed: raise ValueError('recovery authority changed')
+        if artifact['descriptor']['candidate_sha256'] in experiments:
+            return experiments[artifact['descriptor']['candidate_sha256']].recovery(artifact,signed)
+        if entry.get('collect_lost_ack'):
+            return collect_controlled_lost_ack(artifact,signed,dsn=target_dsn(context['dsn_env'],config),
+                target_config=config,authority_verifier=verifier)
+        if bool(entry.get('prior'))!=bool(entry.get('reconciled')):
+            raise ValueError('both actual unknown-commit and recovery observations required')
+        if not entry.get('prior'): return None
+        return {'prior':observation_from(read(within(root,entry['prior'],exists=True))),
+                'reconciled':observation_from(read(within(root,entry['reconciled'],exists=True)))}
+
+    def prepare_v2(visible,mapping,method,edition,phase_scope):
+        return prepare(visible,mapping,method,edition,phase_scope['freeze_sha256'],phase_scope=phase_scope)
+
+    return TargetPorts(prepare=prepare,grant=grant,observe=observe,failed_load=failed_load,recovery=recovery,prepare_v2=prepare_v2)

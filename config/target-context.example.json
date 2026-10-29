@@ -1,0 +1,7 @@
+{
+  "root": "REPLACE_WITH_EXPLICIT_OPERATOR_TARGET_ROOT",
+  "public_trust_root": "REPLACE_WITH_EXPLICIT_OPERATOR_PUBLIC_TRUST_ROOT",
+  "public_trust_profile": "operator-public-keys.json",
+  "grants": "candidate-grants.json",
+  "dsn_env": "LA_DISPOSABLE_TARGET_DSN"
+}

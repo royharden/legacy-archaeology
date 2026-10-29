@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "edition": "REPLACE_WITH_EXACT_EDITION",
+  "visibility": "public",
+  "manifest_refs": [
+    {"sha256": "REPLACE_WITH_ACTUAL_VARIANT_MANIFEST_SHA256", "kind": "variant_manifest"}
+  ],
+  "cases": "operator/public-or-actually-retired-cases.json",
+  "configuration": "operator/credential-free-configuration.json"
+}

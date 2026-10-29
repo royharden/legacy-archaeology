@@ -4,3 +4,5 @@ __pycache__/
 .la-runs/
 *.sqlite*
 *.bak-*
+.env
+.env.*

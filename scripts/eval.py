@@ -1,19 +1,365 @@
-"""Development evaluation entrypoint. Hidden/paid activation is intentionally gated."""
+"""Evaluator-only source CLI. Never imported by the inference wheel.
+
+Trusted ports factories inject product/provider/target capabilities. They are not
+a sandbox and must be audited at the frozen release before hidden/live operation.
+"""
 import argparse
+import importlib
 import json
+import sys
 from pathlib import Path
 
-def main():
-    p=argparse.ArgumentParser(); p.add_argument('--mode',choices=['replay','mock','live'],default='replay')
-    p.add_argument('--split',choices=['development','validation','heldout'],default='development')
-    p.add_argument('--evidence'); p.add_argument('--config')
-    args=p.parse_args()
-    if args.split!='development' or args.mode=='live':
-        raise SystemExit('Hidden custody, frozen suite and paid provider activation remain deferred; no eligible run')
-    if not args.evidence: raise SystemExit('--evidence retired/development projection required')
-    evidence=json.loads(Path(args.evidence).read_text(encoding='utf-8'))
-    from evaluation.scorer import score_product
-    result=score_product(evidence['oracle_records'],evidence['outcomes'],evidence['mapping'],edition=evidence.get('edition','development'))
-    print(json.dumps(result,indent=2))
 
-if __name__=='__main__': main()
+def parser():
+    p = argparse.ArgumentParser(description='Independent evaluator; no hidden asset generation or inference wheel imports')
+    p.add_argument('--evidence-root', default='.', help='declared evaluator-owned public/retired or separately authorized external root')
+    p.add_argument('--out', default='captures', help='capture directory relative to evidence root')
+    sub = p.add_subparsers(dest='command', required=True)
+    q = sub.add_parser('parity'); q.add_argument('--evidence', required=True)
+    q = sub.add_parser('target'); q.add_argument('--evidence', required=True)
+    q=sub.add_parser('target-effects'); q.add_argument('--evidence',required=True)
+    q=sub.add_parser('prepare-target'); q.add_argument('--evidence',required=True)
+    q = sub.add_parser('replay'); q.add_argument('--evidence', required=True)
+    q.add_argument('--registry',help='required actual evaluator registry for retired hidden replay')
+    q = sub.add_parser('suite')
+    sources=q.add_mutually_exclusive_group(required=True)
+    sources.add_argument('--cases'); sources.add_argument('--public-development',action='store_true')
+    q.add_argument('--ports',default='scripts.product_ports:factory',help='trusted module:factory(context) -> RunnerPorts')
+    q.add_argument('--config', required=True, help='non-secret factory context/pins/authority/freeze/custody packet')
+    q.add_argument('--mode', choices=['rules', 'mock', 'live'], default='mock')
+    q.add_argument('--split', choices=['development', 'validation', 'heldout'], default='development')
+    q.add_argument('--evaluator-authorized', action='store_true')
+    q.add_argument('--eligibility-factory',default='scripts.eligibility_factory:factory',help='trusted evaluator-owned module:factory; no JSON custody shortcuts')
+    q.add_argument('--public-trust-root'); q.add_argument('--public-trust-profile')
+    q.add_argument('--target-factory',help='explicit evaluator-owned module:factory returning D6 TargetPorts')
+    q = sub.add_parser('public-corpus'); q.add_argument('variant')
+    q=sub.add_parser('public-catalog'); q.add_argument('--nonce',required=True); q.add_argument('--corpus-commitment-sha256')
+    for name in ('edition-register','edition-freeze','edition-state','edition-export','edition-disposition'):
+        q=sub.add_parser(name); q.add_argument('--registry',required=True)
+        if name in ('edition-register','edition-freeze','edition-disposition'):
+            q.add_argument('--packet',required=True); q.add_argument('--request-id',required=True); q.add_argument('--expected-head')
+        if name in ('edition-state','edition-disposition'): q.add_argument('--edition',required=True)
+        if name=='edition-disposition':
+            q.add_argument('--action',choices=['exposed','retired'],required=True)
+            q.add_argument('--public-trust-root',required=True); q.add_argument('--public-trust-profile',required=True)
+    sub.add_parser('contract')
+    return p
+
+
+def t3_precheck(protected,cases,config,*,target_factory=None):
+    """Every check provider_port and run_suite make before begin(), run before the
+    irreversible admission (mirrors evaluation/runner.py run_suite and
+    ProtectedLiveContext.provider_port); only scope-inherent checks remain after it."""
+    from la.contracts import digest
+    from evaluation.runner import _prompt_input
+    from evaluation.eligibility import variant_identity
+    eligibility=protected.eligibility
+    suite=eligibility.suite
+    if ([case.variant_id for case in cases]!=suite['variant_ids'] or len(cases)!=8
+            or len({case.variant_id for case in cases})!=8 or suite['mode']!='live'
+            or any(case.split!='heldout' or case.edition!=protected.edition for case in cases)):
+        raise ValueError('T3 cases must be exactly the 8 declared live heldout suite variants of this edition')
+    for case in cases:
+        if len(case.batches)!=10 or any(len(batch.oracle)!=100 for batch in case.batches):
+            raise ValueError('each variant requires ten 100-record batches')
+        malformed=sum(row['expected_outcome']=='quarantined' for batch in case.batches for row in batch.oracle)
+        if not 20<=malformed<=50: raise ValueError('sealed 2-5 percent malformed stratum required per variant')
+    if type(config.get('attempt_request_id')) is not str or not config['attempt_request_id']:
+        raise ValueError('exact attempt request id required')
+    if config.get('freeze')!=eligibility.freeze or (config.get('pins') or {})!=eligibility.freeze['pins']:
+        raise ValueError('mixed frozen suite configurations')
+    declared={item['variant_id']:item for item in eligibility.commitment['variants']}
+    if any(variant_identity(case)!=declared.get(case.variant_id) for case in cases):
+        raise ValueError('actual source/sample/brief/oracle differs from T0')
+    if len({digest(_prompt_input(case.visible)) for case in cases})!=len(cases):
+        raise ValueError('two heldout variants share one provider-visible input; ambiguous T3 attribution')
+    eligibility.validate()
+    # D7 transport preconditions: each fails before sending yet after begin(), so
+    # it would settle unknown and consume the sealed edition. Check them now.
+    import os
+    from la.providers.evaluation import provider_text
+    from la.providers.accounting import CallLedger
+    scope=protected._scope(check_time=True)  # the same read admit() performs
+    if scope['provider']!='openai-responses':
+        raise ValueError('T3 scope provider is not the single supported D7 live provider')
+    if not os.environ.get('OPENAI_API_KEY'):  # presence only; the value is never kept or logged
+        raise ValueError('OPENAI_API_KEY must be set before T3 admission')
+    limit=min(8000,scope['caps']['max_input_tokens'])
+    for case in cases:
+        text=provider_text('B1',{'purpose':'single_pass_full_mapping','input':_prompt_input(case.visible)})
+        if len(text.encode())>limit:
+            raise ValueError('B1 provider text for '+case.variant_id+' exceeds the D7 byte bound')
+    if target_factory and (config.get('target_freeze_sha256') or config['freeze']['freeze_sha256'])!=eligibility.freeze['freeze_sha256']:
+        raise ValueError('target freeze pin differs from the frozen T2 freeze')
+    attempt=config['attempt_request_id']
+    used={event['request_id'] for event in protected.registry.events()}
+    derived={attempt,attempt+':finish',attempt+':failure'}
+    if config['t3_admission_request_id'] in derived or derived&used:
+        raise ValueError('attempt request id collides with an admission or existing registry request')
+    ledger=CallLedger(Path(config.get('port_context',{}).get('ledger_path','.la-runs/evaluator-provider.sqlite')))
+    snapshot=ledger.snapshot()
+    if snapshot['unknown_attempt_ids']:
+        raise ValueError('D7 provider ledger has an open reserved/unknown liability; reconcile or fence it first')
+    # With no open liability, known cost is the ledger's whole liability; every
+    # signed T3 request must still fit the shared lifetime cap (T1 spend counts too).
+    from la.providers.accounting import amount
+    billing=config['port_context']['provider_config']
+    per_call=(billing['max_input_tokens']*amount(billing['input_usd_per_million'])
+              +billing['max_output_tokens']*amount(billing['output_usd_per_million']))/1000000
+    if amount(snapshot['known_cost_usd'])+scope['caps']['max_total_requests']*per_call>amount(billing['total_cap_usd']):
+        raise ValueError('D7 ledger total_cap_usd cannot cover the worst-case signed T3 reservations')
+
+
+def admit_t3(protected,config):
+    """Admit the signed scope once, or resume it from this edition's own folded state.
+
+    Resume never uses the global registry tail (other editions append to the same
+    chain). It requires this exact scope admitted, no attempt, no calls, not
+    exposed/retired, and an operator-supplied t3_resume_registry_head equal to the
+    one snapshot read; begin()'s CAS still catches any later append.
+    """
+    registry=protected.registry
+    snapshot=registry.snapshot()
+    state=type(registry)._state(snapshot['events'],protected.edition)
+    admitted=state.get('t3')
+    if admitted is None:
+        receipt=protected.admit(request_id=config['t3_admission_request_id'],
+                                expected_head=config.get('expected_registry_head'))
+        return receipt.event['event_sha256']
+    if admitted['scope_receipt_sha256']!=protected.scope_sha256():
+        raise ValueError('a different T3 scope is already admitted for this edition')
+    if state['attempt'] is not None or admitted['calls'] or state['exposed'] or state['retired']:
+        raise ValueError('admitted T3 scope already has an attempt/calls or a disposition; no resume')
+    head=config.get('t3_resume_registry_head')
+    if head is None or head!=snapshot['head']:
+        raise ValueError('resume requires t3_resume_registry_head equal to the current registry head (see edition-export)')
+    return head
+
+
+def execute(args):
+    # This script is deliberately outside the installed inference distribution.
+    base = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(base))
+    from la.app.artifacts import within, read, receipt
+    from evaluation.artifacts import CaptureStore
+    root = Path(args.evidence_root).resolve(strict=True)
+    if args.command == 'contract':
+        from evaluation.benchmark import corpus_contract, not_run_report
+        return dict(contract=corpus_contract(), results=not_run_report())
+    # Check explicit eligibility before opening any suite case/oracle file.
+    config = {}
+    if args.command == 'suite':
+        config = read(within(root, args.config, exists=True))
+        if (args.mode == 'live' or args.split == 'heldout') and (
+                not args.evaluator_authorized or not args.eligibility_factory or not args.public_trust_root or not args.public_trust_profile):
+            raise ValueError('explicit evaluator authority and trusted signed-observation eligibility factory required before case access')
+    capture_root = within(root, args.out)
+    capture_root.mkdir(parents=True, exist_ok=True)
+    store = CaptureStore(capture_root)
+    eligibility=protected=None
+    suite_head=config.get('expected_registry_head')
+    if args.command=='suite' and (args.mode=='live' or args.split=='heldout'):
+        from evaluation.edition_registry import EligibilityContext
+        from evaluation.public_live import PublicLiveContext
+        module,separator,symbol=args.eligibility_factory.partition(':')
+        if not separator: raise ValueError('trusted eligibility module:factory required')
+        eligibility=getattr(importlib.import_module(module),symbol)(
+            {'store':store,'evidence_root':root,'packet':config.get('eligibility_context',{}),
+             'public_trust_root':args.public_trust_root,'public_trust_profile':args.public_trust_profile,
+             'billing_config':config.get('port_context',{}).get('provider_config')})
+        try:
+            from evaluation.protected_live import ProtectedLiveContext
+        except ImportError:
+            ProtectedLiveContext=None  # producer absent: T3 live spend stays unavailable, never raw
+        if ProtectedLiveContext is not None and type(eligibility) is ProtectedLiveContext:
+            if args.mode!='live' or args.split!='heldout' or args.ports!='scripts.product_ports:factory':
+                raise ValueError('T3 spend scope applies only to a live heldout suite with the trusted product ports')
+            if type(config.get('t3_admission_request_id')) is not str or not config['t3_admission_request_id']:
+                raise ValueError('explicit T3 scope admission request id required')
+            # Admission is irreversible (one scope per edition), so it happens in
+            # admit_t3() only after every admission-free suite check has passed.
+            protected,eligibility=eligibility,eligibility.eligibility
+        elif type(eligibility) not in (EligibilityContext,PublicLiveContext): raise ValueError('actual T1/T3 context required; booleans refused')
+        if args.mode=='live' and args.split=='heldout' and protected is None:
+            raise ValueError('live heldout requires a signed admitted T3 spend scope; no unmetered provider')
+        eligibility.validate()
+        expected_freeze=None if type(eligibility) is PublicLiveContext else eligibility.freeze
+        if eligibility.registry.store.root!=store.root or expected_freeze!=config.get('freeze'):
+            raise ValueError('eligibility capture root/freeze mismatch')
+        if type(eligibility) is PublicLiveContext and args.split=='heldout': raise ValueError('T1 public context grants no hidden access')
+    if args.command.startswith('edition-'):
+        from evaluation.edition_registry import EditionRegistry
+        registry=EditionRegistry(within(root,args.registry,exists=args.command not in ('edition-register',)),store)
+        if args.command=='edition-state': return registry.state(args.edition)
+        if args.command=='edition-export': return {'head':registry.head,'event_captures':registry.export()}
+        packet=read(within(root,args.packet,exists=True))
+        if packet.get('kind')=='public-catalog':
+            from la.contracts import digest
+            if packet.get('receipt_sha256')!=digest({k:v for k,v in packet.items() if k not in ('receipt_sha256','path')}):
+                raise ValueError('public catalog wrapper identity mismatch')
+            packet=packet['payload']
+        if args.command=='edition-register':
+            result=(registry.register_public if packet.get('stage')=='T1' else registry.register)(
+                packet,request_id=args.request_id,expected_head=args.expected_head)
+        elif args.command=='edition-freeze': result=registry.freeze(packet,request_id=args.request_id,expected_head=args.expected_head)
+        else:
+            from evaluation.eligibility import ReceiptVerifier
+            from la.app.public_trust import public_keys
+            result=registry.disposition(args.edition,args.action,packet,
+                verifier=ReceiptVerifier(*public_keys(args.public_trust_root,args.public_trust_profile)),
+                request_id=args.request_id,expected_head=args.expected_head)
+        return {'event':result.event,'capture':result.capture,'newly_created':result.newly_created,'head':registry.head}
+    if args.command=='public-catalog':
+        from evaluation.public_live import make_public_catalog
+        cases=public_cases()
+        catalog=make_public_catalog(cases,nonce=args.nonce,corpus_commitment_sha256=args.corpus_commitment_sha256)
+        return receipt(capture_root,'public-catalog',catalog)
+    if args.command == 'public-corpus':
+        from evaluation.corpus import build_development_variant, capture_public_variant
+        corpus = build_development_variant(args.variant)
+        return dict(corpus=capture_public_variant(store, corpus), benchmark_status='not_run')
+    if args.command == 'suite':
+        from evaluation.runner import BatchCase, VariantCase, RunnerPorts, run_suite
+        if args.public_development:
+            if args.split!='development': raise ValueError('built-in corpus is public development only')
+            cases=public_cases()
+        else:
+            raw = read(within(root, args.cases, exists=True))
+            cases = [VariantCase(item['variant_id'], args.split, item['edition'], item['visible'],
+                tuple(BatchCase(batch['batch_id'], batch['visible'], batch['oracle']) for batch in item['batches']),
+                item.get('accepted_choices', {}), item.get('expected_layout')) for item in raw['variants']]
+        module, separator, symbol = args.ports.partition(':')
+        if not separator or not module or not symbol:
+            raise ValueError('explicit trusted ports module:factory required')
+        context = config.get('port_context', {})
+        # No cases, oracle, accepted choices, expected layout, custody secrets or
+        # evaluator storage handles are passed into the inference factory.
+        forbidden = {'oracle', 'oracle_records', 'accepted_choices', 'expected_layout', 'cases', 'custody'}
+        if set(context) & forbidden:
+            raise ValueError('factory context must not contain evaluator-only inputs')
+        selected_factory=getattr(importlib.import_module(module),symbol)
+        target_ports=None
+        if args.target_factory:
+            from evaluation.target_runner import TargetPorts
+            module,separator,symbol=args.target_factory.partition(':')
+            if not separator: raise ValueError('explicit target module:factory required')
+            target_ports=getattr(importlib.import_module(module),symbol)(config.get('target_context',{}))
+            if not isinstance(target_ports,TargetPorts): raise ValueError('actual TargetPorts required')
+        if protected is not None:
+            t3_precheck(protected,cases,config,target_factory=args.target_factory)
+            # Dry-run build with no authority: context keys, imports and RunnerPorts
+            # shape fail here, before admission (provider_port reads authority lazily).
+            dry=selected_factory(context,provider_authority=None)
+            if not isinstance(dry,RunnerPorts) or dry.count_tokens is None:
+                raise ValueError('T3 requires actual RunnerPorts with the explicit token counter')
+            suite_head=admit_t3(protected,config)
+        if args.ports=='scripts.product_ports:factory':
+            from evaluation.public_live import PublicLiveContext
+            signed_provider=(eligibility.validate() if type(eligibility) is PublicLiveContext
+                             else protected.trusted_authority() if protected is not None else None)
+            ports=selected_factory(context,provider_authority=signed_provider)
+        else: ports=selected_factory(context)
+        if not isinstance(ports, RunnerPorts): raise ValueError('factory must supply actual RunnerPorts')
+        if protected is not None:
+            import dataclasses
+            if ports.count_tokens is None: raise ValueError('T3 meter requires the explicit token counter')
+            # D6 meter reserves/settles in the registry around the trusted D7 transport.
+            # The runner's own D6 hooks enforce the protected port and signed max_questions.
+            ports=dataclasses.replace(ports,provider=protected.provider_port(ports.provider,cases,ports.count_tokens))
+        result = run_suite(cases, ports, store, split=args.split, mode=args.mode, pins=config.get('pins'),
+            authority=config.get('authority'), freeze=config.get('freeze'), custody=config.get('custody'),
+            eligibility=eligibility,attempt_request_id=config.get('attempt_request_id'),expected_registry_head=suite_head,
+            target_ports=target_ports,target_freeze_sha256=config.get('target_freeze_sha256'))
+        return receipt(capture_root, 'evaluation', dict(edition=cases[0].edition, result=result,
+            benchmark_status=result['summary']['benchmark_status'], product_acceptance='pending'))
+    evidence = read(within(root, args.evidence, exists=True))
+    if args.command == 'replay':
+        from evaluation.runner import replay_archive
+        from evaluation.edition_registry import EditionRegistry
+        registry=EditionRegistry(within(root,args.registry,exists=True),store) if args.registry else None
+        return replay_archive(store, evidence['manifest_ref'], evidence['oracle_records'],
+                              retirement_ref=evidence.get('retirement_ref'),registry=registry)
+    # Direct projections are public only. Hidden replay requires sealed capture
+    # and retirement verification through replay_archive, never a truthy label.
+    if args.command!='prepare-target' and evidence.get('split', 'development') != 'development':
+        raise ValueError('direct scoring requires public development evidence; use retired capture replay')
+    if args.command=='prepare-target':
+        required={'schema_version','split','visible','mapping','method','edition','freeze_sha256'}
+        phase_keys={'evaluation_phase','evaluation_plan_sha256'}
+        if set(evidence) not in (required,required|phase_keys) or evidence['split'] not in ('development','validation'):
+            raise ValueError('closed public visible/proposal target preparation packet required; no gold')
+        from scripts.target_ports import prepare
+        phase=({k:evidence[k] for k in phase_keys|{'split','freeze_sha256'}} if phase_keys<=set(evidence) else None)
+        artifact=prepare(evidence['visible'],evidence['mapping'],evidence['method'],evidence['edition'],
+                         evidence['freeze_sha256'],phase_scope=phase)
+        return receipt(capture_root,'evaluation-candidate',artifact)
+    if args.command=='target-effects':
+        from evaluation.target_effects import TargetExpectation,grade_target
+        values=evidence['expectation']
+        if 'required_negatives' in values: values['required_negatives']=tuple(values['required_negatives'])
+        expectation=TargetExpectation(**values).validate()
+        observation=observation_from(evidence.get('observation'))
+        result=grade_target(evidence['oracle_records'],observation,expectation=expectation,
+            prior=observation_from(evidence.get('prior')),failed_load=observation_from(evidence.get('failed_load')),
+            recovery_observation=observation_from(evidence.get('recovery_observation')),edition=evidence.get('edition','development'))
+        result['row_parity']='not_run' if result['target_validation']=='not_run' else result['score']['row_parity']
+        return receipt(capture_root,'evaluation',dict(source_sha256=expectation.candidate['source_sha256'],
+            mapping_sha256=expectation.candidate['mapping_sha256'],candidate_sha256=expectation.candidate['candidate_sha256'],
+            edition=evidence.get('edition','development'),operation='target',result=result,product_acceptance='pending'))
+    if args.command == 'parity':
+        from evaluation.scorer import score_product
+        result = score_product(evidence['oracle_records'], evidence['outcomes'], evidence['mapping'],
+                               edition=evidence.get('edition', 'development'))
+        pins = dict(source_sha256=evidence['mapping']['source_sha256'], mapping_sha256=evidence['mapping']['mapping_sha256'])
+    else:
+        from evaluation.target import score_target, score_execution_receipt
+        if 'execution_receipt' in evidence:
+            execution = evidence['execution_receipt']
+            if execution.get('kind') == 'execution':
+                # Common CLI envelope encloses D5's actual sealed receipt.
+                from la.app.artifacts import checked_receipt
+                if digest_receipt(execution) != execution.get('receipt_sha256'):
+                    raise ValueError('execution wrapper hash mismatch')
+                execution = execution['payload']['observation']
+            result = score_execution_receipt(evidence['oracle_records'], execution, evidence['mapping'],
+                bundle_sha256=evidence['bundle_sha256'], edition=evidence.get('edition', 'development'))
+        else:
+            result = score_target(evidence['oracle_records'], evidence.get('observation'),
+                bundle_sha256=evidence['bundle_sha256'], mapping_sha256=evidence['mapping_sha256'],
+                edition=evidence.get('edition', 'development'))
+        pins = dict(source_sha256=evidence['source_sha256'], mapping_sha256=evidence['mapping_sha256'],
+                    bundle_sha256=evidence['bundle_sha256'])
+    return receipt(capture_root, 'evaluation', dict(pins, edition=evidence.get('edition', 'development'),
+        operation=args.command, result=result, product_acceptance='pending'))
+
+
+def digest_receipt(value):
+    from la.contracts import digest
+    return digest({k:v for k,v in value.items() if k != 'receipt_sha256'})
+
+
+def observation_from(value):
+    if value is None: return None
+    if type(value) is dict and value.get('kind')=='target-observation':
+        if set(value)!={'schema_version','kind','payload','receipt_sha256'} or digest_receipt(value)!=value['receipt_sha256']:
+            raise ValueError('immutable target-observation wrapper mismatch')
+        return value['payload']['observation']
+    return value
+
+
+def public_cases():
+    """Only public canonical-first generator source; never called in construction."""
+    from evaluation.corpus import development_layouts,build_development_variant,variant_case
+    return [variant_case(build_development_variant(layout['variant_id'])) for layout in development_layouts()]
+
+
+def main():
+    try:
+        from la.app.cli import emit_result
+        emit_result(execute(parser().parse_args()))
+    except (ValueError, OSError, KeyError, TypeError, ImportError, AttributeError) as exc:
+        # External callbacks can contain secrets in exception messages.
+        raise SystemExit('la_eval: '+type(exc).__name__+'; inspect local non-secret input contracts') from None
+
+
+if __name__ == '__main__': main()

@@ -1,0 +1,1 @@
+Synthetic account ledger concepts: account_ref (text preserving leading zeros), description (text), balance (exact decimal), effective_date (calendar date or declared null), and status (O = open, C = closed). Layout, field order, padding, sign, numeric scale and date interpretation remain unknown. Public teaching input, not held-out evaluation.

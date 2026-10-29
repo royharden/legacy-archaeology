@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.26,<2"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,10 +7,14 @@ name = "legacy-archaeology"
 version = "0.1.0"
 description = "Evidence-bound fixed-width account migration candidates"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.10,<3"]
+dependencies = ["pydantic==2.14.1"]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2,<4"]
+postgres = ["psycopg[binary]==3.3.6"]
+evaluator = ["cryptography==50.0.2"]
+
+[dependency-groups]
+build = ["build==1.2.2.post1", "hatchling==1.27.0"]
 
 [project.scripts]
 la = "la.app:main"
